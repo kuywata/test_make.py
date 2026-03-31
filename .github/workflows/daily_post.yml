@@ -2,7 +2,7 @@ name: Daily Inburi News
 
 on:
   schedule:
-    # ตั้งเวลาทำงาน 23:00 UTC ตรงกับ 06:00 น. ของไทย
+    # 23:00 UTC = 06:00 น. เวลาไทย
     - cron: '0 23 * * *'
   workflow_dispatch: 
 
@@ -19,8 +19,8 @@ jobs:
           python-version: '3.10'
 
       - name: Install Libraries
-        # เพิ่ม pytz เข้าไปในรายการติดตั้งเพื่อให้ระบบจัดการเรื่องเวลาได้
-        run: pip install requests feedparser google-genai pytz
+        # ต้องมี pytz ระบบถึงจะไม่งอแงเรื่องเวลา
+        run: pip install requests google-genai pytz
 
       - name: Run Main Script
         env:
