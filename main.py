@@ -6,15 +6,15 @@ import json
 from datetime import datetime
 import pytz
 
-# 1. ตั้งค่าพื้นฐานและดึงกุญแจความลับ
+# 1. ตั้งค่าพื้นฐานและดึงข้อมูลเวลาปัจจุบัน
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ดึงวันที่ปัจจุบันของไทย
+# ล็อกโซนเวลาประเทศไทยเพื่อให้ข้อมูล "สดใหม่" ตรงวัน
 tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
-current_date_th = now.strftime("%d %B 2569") # เช่น 31 มีนาคม 2569
+current_date_th = now.strftime("%d %B 2569") 
 
 def get_inburi_weather():
     weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m&timezone=Asia%2FBangkok"
@@ -45,26 +45,23 @@ def get_raw_water_data():
     return inburi_raw, c13_raw
 
 def generate_water_summary(inburi_raw, c13_raw):
-    # ปรับ Prompt ให้ดุดันเรื่อง "วันที่" และ "ความสดใหม่"
+    # คำสั่งล็อก AI ให้หาข้อมูลของ "วันนี้" เท่านั้น
     prompt = f"""
-    วันนี้คือวันที่ {current_date_th} เวลา {now.strftime('%H:%M น.')}
+    วันนี้คือวันที่ {current_date_th} (ปี 2569) เวลาปัจจุบัน {now.strftime('%H:%M น.')}
     
     คำสั่งเด็ดขาด: 
-    1. รายงานสถานการณ์น้ำ อ.อินทร์บุรี ต้องเป็นข้อมูลล่าสุดของวันนี้ ({current_date_th}) เท่านั้น 
-    2. ห้ามใช้ข้อมูลเก่าของวันที่ 29 หรือ 30 มีนาคม มาตอบโดยเด็ดขาด หากค้นหาข้อมูลของวันนี้ไม่พบ ให้ระบุว่า "รออัปเดตข้อมูลล่าสุด"
-    
-    ข้อมูลดิบจากระบบ:
-    - สถานี C.3 (อินทร์บุรี): {inburi_raw if inburi_raw else 'API_NOT_RESPONDING'}
-    - สถานี C.13 (เขื่อนเจ้าพระยา): {c13_raw if c13_raw else 'API_NOT_RESPONDING'}
+    1. รายงานสถานการณ์น้ำต้องเป็นข้อมูลล่าสุดของวันนี้ ({current_date_th}) เท่านั้น ห้ามใช้ข้อมูลเก่าของวันที่ 29 หรือ 30 มาตอบเด็ดขาด
+    2. ถ้าในระบบ API ไม่มีข้อมูลของวันนี้ ให้คุณใช้ Google Search ค้นหา "รายงานสถานการณ์น้ำลุ่มเจ้าพระยา วันนี้" เพื่อเอาตัวเลขจริงมาตอบ
+    3. ระดับตลิ่งอินทร์บุรีคือ 13.10 เมตร (คำนวณ: 13.10 - ระดับน้ำปัจจุบัน)
 
-    ภารกิจ:
-    - ค้นหา Google Search เพื่อยืนยันตัวเลขการระบายน้ำของเขื่อนเจ้าพระยา (C.13) "ของวันนี้" เท่านั้น
-    - คำนวณความห่างตลิ่งอินทร์บุรี: (13.10 - ระดับน้ำปัจจุบัน) 
-    
-    รูปแบบที่ต้องแสดง (ห้ามมีคำอื่น):
+    รูปแบบโพสต์:
     รายงานสถานการณ์น้ำประจำวันที่ {current_date_th}
     • ระดับน้ำอินทร์บุรี: ความสูง [เลข] ม.รทก. (ห่างจากตลิ่ง [เลข] เมตร)
     • เขื่อนเจ้าพระยาปล่อยน้ำ: วันนี้ [เลข] ลบ.ม./วินาที (เมื่อวาน [เลข] ลบ.ม./วินาที)
+
+    ข้อมูลดิบ API:
+    - C.3: {inburi_raw if inburi_raw else 'ไม่มีข้อมูล'}
+    - C.13: {c13_raw if c13_raw else 'ไม่มีข้อมูล'}
     """
     
     response = client.models.generate_content(
@@ -82,7 +79,6 @@ if __name__ == "__main__":
     final_message = f"📍 **[อัปเดตพื้นที่อินทร์บุรี]**\n"
     final_message += f"• สภาพอากาศ (ตลาดอินทร์บุรี): อุณหภูมิเช้านี้ {temp}\n"
     final_message += f"• คุณภาพอากาศ (PM 2.5): {pm25}\n"
-    final_message += f"{water_summary.strip()}\n"
-    final_message += f"\n#อินทร์บุรีรอดมั้ย"
+    final_message += f"{water_summary.strip()}\n\n#อินทร์บุรีรอดมั้ย"
     
     requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_message})
