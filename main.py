@@ -33,16 +33,22 @@ def get_water_data():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # 1. เทคนิคขั้นสุดยอด: เปิดเว็บแบบคน แต่ดักฉกข้อมูล API หลังบ้าน!
+        # 1. ดึงข้อมูล Thaiwater (แก้บั๊ก String Object)
         try:
             print("กำลังเข้าเว็บ Thaiwater และดักจับ API...")
-            # สั่งให้บอทรอจับไฟล์ JSON ระหว่างที่เว็บกำลังโหลด (ทะลุ WAF และได้เลขเป๊ะๆ 100%)
             with page.expect_response(re.compile(r".*/public/waterlevel"), timeout=30000) as response_info:
                 page.goto("https://www.thaiwater.net/water/wl", timeout=60000)
             
-            data = response_info.value.json()
-            waterlevel_data = data.get('waterlevel_data', [])
-            for s in waterlevel_data:
+            # อ่านค่าดิบมาปอกเปลือก
+            raw_text = response_info.value.text()
+            data = json.loads(raw_text)
+            
+            # ป้องกันกรณีที่ API ห่อข้อมูลมาเป็น String ซ้อน String
+            if isinstance(data, str):
+                data = json.loads(data)
+                
+            wl_list = data.get('waterlevel_data', []) if isinstance(data, dict) else data
+            for s in wl_list:
                 code = s.get('station', {}).get('station_old_code', '')
                 if code == 'C.3':
                     wl = float(s.get('water_level', 0))
@@ -51,14 +57,18 @@ def get_water_data():
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการดักจับข้อมูล Thaiwater: {e}")
 
-        # 2. สำรองดึงการระบายน้ำจาก HII (ถ้ายังไม่ได้จาก Thaiwater)
+        # 2. ดึงข้อมูล HII (เปลี่ยนไปอ่านจากโค้ด HTML โดยตรง)
         if discharge == "รออัปเดต":
             try:
                 print("กำลังเข้าเว็บ HII สำรอง...")
                 page.goto("https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php", timeout=60000)
                 page.wait_for_timeout(10000)
-                body_text = page.locator("body").inner_text()
-                match = re.search(r'ท้ายเขื่อนเจ้าพระยา.*?ปริมาณน้ำ\s*([\d\.]+)', body_text, re.DOTALL | re.IGNORECASE)
+                
+                # ดึง HTML โค้ดทั้งหมดของหน้าเว็บมาค้นหา
+                html_content = page.content()
+                
+                # ทะลวงหาตัวเลขที่อยู่หลังคำว่า 'ปริมาณน้ำ' โดยข้ามโค้ด HTML รูปภาพออกไป
+                match = re.search(r'ท้ายเขื่อนเจ้าพระยา.*?ปริมาณน้ำ[^\d]+([\d\.]+)', html_content, re.DOTALL | re.IGNORECASE)
                 if match:
                     discharge = float(match.group(1))
             except Exception as e:
@@ -83,7 +93,6 @@ if __name__ == "__main__":
     with open(STATE_FILE, "r", encoding="utf-8") as f:
         old_state = json.load(f)
             
-    # ข้ามการโพสต์ถ้าตัวเลขเหมือนเดิมเป๊ะ หรือดึงไม่ได้ทั้งคู่
     if current_state["wl"] == old_state.get("wl") and current_state["discharge"] == old_state.get("discharge"):
         print(f"⚠️ ข้อมูลไม่มีการเปลี่ยนแปลง (น้ำ: {wl}, ระบาย: {discharge}) ระบบข้ามการโพสต์")
         exit(0)
