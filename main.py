@@ -7,7 +7,6 @@ import pytz
 from google import genai
 from playwright.sync_api import sync_playwright
 
-# ตั้งค่า API
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 client = genai.Client(api_key=GEMINI_API_KEY)
@@ -31,38 +30,42 @@ def get_water_data():
     discharge = "รออัปเดต"
     
     with sync_playwright() as p:
-        # เปิด Browser แบบซ่อนหน้าจอ
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
         # 1. ดึงระดับน้ำอินทร์บุรี (thaiwater.net)
         try:
+            print("กำลังเข้าเว็บ Thaiwater...")
             page.goto("https://www.thaiwater.net/water/wl", timeout=60000)
-            # รอจนกว่าตารางคำว่า 'สถานีอินทร์บุรี' จะโหลดเสร็จ
-            page.wait_for_selector('text="สถานีอินทร์บุรี"', timeout=30000)
-            # ดักจับแถว (tr) ที่มีคำว่า สถานีอินทร์บุรี
-            row = page.locator('tr:has-text("สถานีอินทร์บุรี")').first
-            # ดึงข้อมูลจากคอลัมน์ (td) ทั้งหมดในแถวนั้น
-            cols = row.locator("td").all_inner_texts()
-            # คอลัมน์ที่ 2 คือระดับน้ำ
-            if len(cols) >= 3:
-                wl = float(cols[2].strip())
+            # แก้ปัญหา Timeout: บังคับให้รอ 15 วินาที เพื่อให้เว็บโหลดตาราง Javascript จนเสร็จชัวร์ๆ
+            page.wait_for_timeout(15000) 
+            
+            # ดึงข้อความทั้งหน้ามาหาคำว่า สถานีอินทร์บุรี แทนการดักจับ Selector ที่อาจจะคลาดเคลื่อน
+            body_text = page.locator("body").inner_text()
+            
+            # ตัดเอาเฉพาะบรรทัดที่มีคำว่า 'สถานีอินทร์บุรี' หรือ 'C.3'
+            for line in body_text.split('\n'):
+                if 'สถานีอินทร์บุรี' in line and 'แม่น้ำเจ้าพระยา' in line:
+                    # หาตัวเลขทศนิยมในบรรทัดนั้น (มักจะเป็นระดับน้ำ)
+                    nums = re.findall(r'\b\d+\.\d{2}\b', line)
+                    if nums:
+                        wl = float(nums[0])
+                        break
         except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการดึงระดับน้ำ: {e}")
+            print(f"เกิดข้อผิดพลาด Thaiwater: {e}")
 
         # 2. ดึงปริมาณการระบายน้ำ (HII)
         try:
+            print("กำลังเข้าเว็บ HII...")
             page.goto("https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php", timeout=60000)
-            # รอจนกว่าคำว่า 'ท้ายเขื่อนเจ้าพระยา' จะปรากฏ
-            page.wait_for_selector('text="ท้ายเขื่อนเจ้าพระยา"', timeout=30000)
-            # ดึงข้อความทั้งหน้ามาใช้ Regular Expression หาตัวเลข
+            # บังคับรอ 10 วินาทีให้โหลดภาพและข้อความเสร็จ
+            page.wait_for_timeout(10000)
             body_text = page.locator("body").inner_text()
-            # ค้นหาแพทเทิร์น: ท้ายเขื่อนเจ้าพระยา ... ปริมาณน้ำ [ตัวเลข]
             match = re.search(r'ท้ายเขื่อนเจ้าพระยา.*?ปริมาณน้ำ\s*([\d\.]+)', body_text, re.DOTALL | re.IGNORECASE)
             if match:
                 discharge = float(match.group(1))
         except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการดึงการระบายน้ำ: {e}")
+            print(f"เกิดข้อผิดพลาด HII: {e}")
 
         browser.close()
         
@@ -73,25 +76,27 @@ if __name__ == "__main__":
     wl, discharge = get_water_data()
     temp, pm25 = get_weather()
     
-    # --------- STATE MANAGEMENT (เช็กการเปลี่ยนแปลง) ---------
-    current_state = {"wl": wl, "discharge": discharge}
-    old_state = {"wl": "รออัปเดต", "discharge": "รออัปเดต"}
-    
-    if os.path.exists(STATE_FILE):
-        with open(STATE_FILE, "r", encoding="utf-8") as f:
-            old_state = json.load(f)
+    # --------- STATE MANAGEMENT ---------
+    # สร้างไฟล์ state.json หลอกไว้ก่อนถ้ายาวไม่มี เพื่อป้องกัน GitHub พังตอน Git add
+    if not os.path.exists(STATE_FILE):
+        with open(STATE_FILE, "w", encoding="utf-8") as f:
+            json.dump({"wl": "รออัปเดต", "discharge": "รออัปเดต"}, f)
             
-    # ถ้าค่าเป็น "รออัปเดต" ทั้งคู่ หรือตัวเลขเท่าเดิมเป๊ะๆ ให้ข้ามการโพสต์
+    current_state = {"wl": wl, "discharge": discharge}
+    
+    with open(STATE_FILE, "r", encoding="utf-8") as f:
+        old_state = json.load(f)
+            
+    # ถ้าค่าไม่ได้มา (รออัปเดต) หรือค่าเท่าเดิมเป๊ะๆ ให้ข้ามการโพสต์
     if current_state["wl"] == old_state.get("wl") and current_state["discharge"] == old_state.get("discharge"):
-        print("⚠️ ข้อมูลน้ำไม่มีการเปลี่ยนแปลงจากรอบที่แล้ว ระบบจะข้ามการโพสต์เพื่อไม่ให้รกเพจ")
-        exit(0) # หยุดการทำงานสคริปต์ตรงนี้
+        print("⚠️ ข้อมูลน้ำไม่มีการเปลี่ยนแปลงจากรอบที่แล้ว หรือดึงข้อมูลไม่ได้ ระบบจะข้ามการโพสต์เพื่อไม่ให้รกเพจ")
+        exit(0)
     else:
         print("✅ พบการเปลี่ยนแปลงของข้อมูล! กำลังบันทึกค่าใหม่ลง State และส่งโพสต์...")
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(current_state, f)
-    # --------------------------------------------------------
+    # ------------------------------------
 
-    # คำนวณความห่างตลิ่งอินทร์บุรี
     bank_level = 13.10
     if isinstance(wl, float):
         dist = round(bank_level - wl, 2)
@@ -109,7 +114,6 @@ if __name__ == "__main__":
     
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
     
-    # ส่ง Webhook
     res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย"})
     if res.status_code == 200:
         print("✅ ส่ง Webhook สำเร็จ!")
