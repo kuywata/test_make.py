@@ -20,7 +20,7 @@ jobs:
 
       - name: Install Libraries
         # ติดตั้งเครื่องมือดึงข่าวและเครื่องมือ AI
-        run: pip install requests feedparser google-generativeai
+       run: pip install requests feedparser google-genai
 
       - name: Run Main Script
         env:
