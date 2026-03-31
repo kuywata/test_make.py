@@ -1,17 +1,16 @@
 import requests
 import feedparser
-import google.generativeai as genai
+from google import genai # เปลี่ยนมาใช้ไลบรารีตัวใหม่
 import os
 
-# 1. ดึงกุญแจจากตู้เซฟ GitHub ที่เราเพิ่งสร้าง
+# 1. ดึงกุญแจจากตู้เซฟ GitHub 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 
-# ตั้งค่า AI
-genai.configure(api_key=GEMINI_API_KEY)
+# 2. ตั้งค่า AI (โค้ดเวอร์ชันใหม่ล่าสุด)
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_inburi_data():
-    # ข้อมูลส่วนนี้ดึงตัวเลขจริง ไม่ผ่าน AI ครับ (ล็อกพิกัดอินทร์บุรีไว้แล้ว)
     weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m&timezone=Asia%2FBangkok"
     aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
     
@@ -31,7 +30,6 @@ def get_inburi_data():
         return "📍 [อัปเดตพื้นที่อินทร์บุรี] (ไม่สามารถดึงข้อมูลได้ในขณะนี้)\n\n"
 
 def get_news_and_summarize():
-    # ดึงข่าวจาก RSS Thai PBS (ข่าวจริง 100%)
     feed = feedparser.parse("https://thaipbs.or.th/rss/news")
     top_3_news = feed.entries[:3]
     
@@ -39,7 +37,6 @@ def get_news_and_summarize():
     for i, entry in enumerate(top_3_news):
         raw_news += f"หัวข้อ: {entry.title}\nรายละเอียด: {entry.description}\n\n"
         
-    # สั่ง AI แบบเข้มงวด ห้ามแต่งเอง
     prompt = f"""
     สรุปข่าวต่อไปนี้ให้สั้น กระชับ เป็น Bullet points เพื่อโพสต์ลง Facebook
     อ้างอิงจากข้อความที่ให้มาเท่านั้น ห้ามแต่งเติม ห้ามแสดงความเห็น ตัวเลขและชื่อต้องเป๊ะ 100%
@@ -48,8 +45,11 @@ def get_news_and_summarize():
     {raw_news}
     """
     
-    model = genai.GenerativeModel('gemini-1.5-flash')
-    response = model.generate_content(prompt)
+    # สั่ง AI ด้วยโค้ดโครงสร้างแบบใหม่
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt
+    )
     
     return "📰 **[สรุปข่าวเด่นเช้านี้]**\n" + response.text
 
@@ -59,10 +59,8 @@ if __name__ == "__main__":
     inburi_info = get_inburi_data()
     news_info = get_news_and_summarize()
     
-    # ประกอบร่างข้อความทั้งหมด
     final_message = inburi_info + news_info + "\n\n-----------------\n🤖 อัปเดตอัตโนมัติ by Alieninburi\n#อินทร์บุรีรอดมั้ย #สรุปข่าวเช้า"
     
-    # ส่งเข้า Make.com
     payload = {"text_to_post": final_message}
     response = requests.post(MAKE_WEBHOOK_URL, json=payload)
     
