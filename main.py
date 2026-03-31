@@ -1,6 +1,6 @@
 import requests
-import feedparser
 from google import genai
+from google.genai import types
 import os
 
 # 1. ดึงกุญแจจากตู้เซฟ GitHub 
@@ -10,7 +10,9 @@ MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 # 2. ตั้งค่า AI
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-def get_inburi_data():
+def get_inburi_weather():
+    # ล็อกพิกัดไว้ที่ "ตลาดอินทร์บุรี" (Lat 14.9961, Lon 100.3253) 
+    # เพื่อให้ได้ข้อมูลฝุ่นและอากาศที่แม่นยำระดับตำบล
     weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m&timezone=Asia%2FBangkok"
     aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
     
@@ -20,70 +22,55 @@ def get_inburi_data():
         
         a_res = requests.get(aqi_url).json()
         pm25 = a_res['current']['pm2_5']
-        
-        text = "📍 **[อัปเดตพื้นที่อินทร์บุรี]**\n"
-        text += f"• สภาพอากาศ: อุณหภูมิเช้านี้ {temp}°C\n"
-        text += f"• คุณภาพอากาศ (PM 2.5): {pm25} μg/m³\n"
-        text += "• ระดับน้ำ: สถานการณ์น้ำแม่น้ำเจ้าพระยาอยู่ในระดับปกติ\n\n"
-        return text
-    except Exception as e:
-        return "📍 [อัปเดตพื้นที่อินทร์บุรี] (ไม่สามารถดึงข้อมูลได้ในขณะนี้)\n\n"
+        return temp, pm25
+    except Exception:
+        return "N/A", "N/A"
 
-def get_news_and_summarize():
-    # ล็อกเป้าดึงเฉพาะข่าวหมวด "การเมือง" และ "เศรษฐกิจ" ตัดข่าวบันเทิง/PR ทิ้ง 100%
-    feed_urls = [
-        "https://www.matichon.co.th/politics/feed",
-        "https://www.matichon.co.th/economy/feed"
-    ]
-    
-    pool_news = []
-    for url in feed_urls:
-        feed = feedparser.parse(url)
-        if feed.entries:
-            # ดึงมาหมวดละ 5 ข่าวล่าสุด รวมเป็น 10 ข่าวใหญ่
-            pool_news.extend(feed.entries[:5])
-            
-    if not pool_news:
-        return "📰 **[สรุปข่าวเด่นเช้านี้]**\n(ระบบไม่สามารถดึงข้อมูลข่าวใหญ่ได้ในขณะนี้)\n"
-        
-    raw_news = ""
-    for i, entry in enumerate(pool_news):
-        published = entry.get('published', 'ไม่ระบุเวลา')
-        raw_news += f"[{i+1}] หัวข้อ: {entry.title}\nรายละเอียด: {entry.description}\nเวลาเผยแพร่: {published}\n\n"
-        
-    # สั่ง AI ด้วย Prompt ขั้นเด็ดขาด
+def generate_local_update(temp, pm25):
     prompt = f"""
-    คุณคือผู้ประกาศข่าวท้องถิ่นที่ต้องสรุป "ข่าวใหญ่ระดับประเทศ" ให้ชาวบ้านอ่าน
-    จากข้อมูลข่าวด้านล่าง ให้ทำตามคำสั่งนี้อย่างเคร่งครัด:
-    
-    1. คัดเลือกเฉพาะข่าวที่เป็น "ข่าวใหญ่ระดับประเทศจริงๆ" จำนวน 3 ข่าว (เช่น นโยบายรัฐบาล, การแจกเงิน, กฎหมายใหม่, ราคาสินค้าเกษตร, เรื่องปากท้องที่กระทบทุกคน)
-    2. สรุปเนื้อหาให้ชาวบ้านอ่านแล้วเข้าใจทันทีว่า "เรื่องนี้ส่งผลกระทบอะไรกับเขา" ใช้ภาษาชาวบ้าน เล่าเรื่องตรงไปตรงมา ไม่อ้อมค้อม (ความยาว 3-4 บรรทัดต่อข่าว)
-    3. ห้ามมีคำเกริ่นนำใดๆ ทั้งสิ้น ให้เริ่มที่เนื้อหาข่าวเลย
+    คุณคือผู้ช่วยรายงานสถานการณ์ท้องถิ่น อ.อินทร์บุรี จ.สิงห์บุรี ที่มีความแม่นยำสูงที่สุด
+    วันนี้อุณหภูมิเช้านี้คือ {temp}°C และ PM 2.5 คือ {pm25} μg/m³ (อ้างอิงพื้นที่ตลาดอินทร์บุรี)
 
-    รูปแบบการสรุปแต่ละข่าว (ทำตามนี้เป๊ะๆ):
-    [ใส่ Emoji 1 ตัว] **[หัวข้อข่าวที่เขียนใหม่ให้อ่านง่ายและดึงดูดใจ]**
-    [สรุปเนื้อหาข่าวแบบตรงประเด็น ภาษาชาวบ้านเข้าใจง่าย]
-    ⏰ เวลา: [แปลงเวลาที่ให้ไปเป็นเวลาไทย เช่น 08:30 น.] | 📰 แหล่งข่าว: มติชนออนไลน์
+    คำสั่ง:
+    ให้คุณค้นหาข้อมูลผ่าน Google Search ทันที เพื่อหา "รายงานสถานการณ์น้ำประจำวัน กรมชลประทาน ล่าสุด" หรือข่าวสถานการณ์น้ำล่าสุดเกี่ยวกับ:
+    1. ระดับน้ำแม่น้ำเจ้าพระยาที่ ต.อินทร์บุรี (หรือ จ.สิงห์บุรี สถานี C.3) ปัจจุบันระดับน้ำสูงเท่าไหร่ และ "ห่างจากระดับตลิ่งเท่าไหร่"
+    2. ปริมาณการระบายน้ำของ "เขื่อนเจ้าพระยา" ล่าสุด ว่าปล่อยน้ำกี่ ลบ.ม./วินาที และเปรียบเทียบกับ "เมื่อวานว่าปล่อยที่กี่ ลบ.ม./วินาที"
 
-    ข้อมูลข่าว:
-    {raw_news}
+    จากนั้นให้จัดทำโพสต์สรุป โดยใช้รูปแบบด้านล่างนี้เป๊ะๆ (ห้ามมีคำเกริ่นนำ ห้ามพิมพ์อธิบายเพิ่ม ห้ามมีข่าวอื่นปนเด็ดขาด):
+
+    📍 **[อัปเดตพื้นที่อินทร์บุรี]**
+    • สภาพอากาศ: อุณหภูมิเช้านี้ {temp}°C
+    • คุณภาพอากาศ (PM 2.5): {pm25} μg/m³
+    • ระดับน้ำอินทร์บุรี: [ใส่ตัวเลขระดับน้ำปัจจุบัน] (ห่างจากตลิ่ง [ใส่ตัวเลข] เมตร)
+    • เขื่อนเจ้าพระยาปล่อยน้ำ: วันนี้ [ใส่ปริมาณวันนี้] ลบ.ม./วินาที (เมื่อวาน [ใส่ปริมาณเมื่อวาน] ลบ.ม./วินาที)
+
+    ⚠️ กฎเหล็ก: 
+    1. ข้อมูลตัวเลขน้ำต้องมาจากความจริงที่ค้นพบจากแหล่งข่าว/กรมชลประทานเท่านั้น ห้ามเดาหรือแต่งเลขเองเด็ดขาด 
+    2. หากระบบค้นหาไม่พบข้อมูลระดับน้ำของเช้าวันนี้จริงๆ ให้เขียนในช่องนั้นว่า "รออัปเดตข้อมูลจากกรมชลประทาน" 
     """
     
+    # สั่ง AI พร้อมเปิดฟีเจอร์ค้นหา Google (Grounding) เพื่อไปดึงเลขน้ำล่าสุด
     response = client.models.generate_content(
         model='gemini-2.5-flash',
-        contents=prompt
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            tools=[types.Tool(google_search=types.GoogleSearch())]
+        )
     )
     
-    return "📰 **[สรุปข่าวใหญ่เช้านี้]**\n\n" + response.text
+    return response.text
 
 if __name__ == "__main__":
-    print("เริ่มการทำงาน...")
+    print("ดึงข้อมูลสภาพอากาศและฝุ่น ตลาดอินทร์บุรี...")
+    temp, pm25 = get_inburi_weather()
     
-    inburi_info = get_inburi_data()
-    news_info = get_news_and_summarize()
+    print("กำลังให้ AI ค้นหาตัวเลขระดับน้ำปัจจุบันและสร้างโพสต์...")
+    final_post = generate_local_update(temp, pm25)
     
-    final_message = inburi_info + news_info + "\n-----------------\n🤖 อัปเดตอัตโนมัติ by Alieninburi\n#อินทร์บุรีรอดมั้ย #สรุปข่าวเช้า"
+    # เติม Tag ท้ายโพสต์
+    final_message = final_post + "\n\n-----------------\n🤖 อัปเดตอัตโนมัติ by Alieninburi\n#อินทร์บุรีรอดมั้ย"
     
+    # ส่งเข้า Make.com
     payload = {"text_to_post": final_message}
     response = requests.post(MAKE_WEBHOOK_URL, json=payload)
     
