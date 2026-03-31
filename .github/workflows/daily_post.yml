@@ -1,0 +1,30 @@
+name: Daily Inburi News
+
+on:
+  schedule:
+    # ตั้งเวลาทำงาน 00:00 UTC ซึ่งตรงกับ 07:00 น. เวลาประเทศไทย
+    - cron: '0 0 * * *'
+  workflow_dispatch: # ปุ่มสำหรับให้เรากดรันเทสต์ด้วยตัวเอง
+
+jobs:
+  post_news:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install Libraries
+        # ติดตั้งเครื่องมือดึงข่าวและเครื่องมือ AI
+        run: pip install requests feedparser google-generativeai
+
+      - name: Run Main Script
+        env:
+          # ดึงกุญแจความลับออกจากตู้เซฟมาใช้งาน
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+        run: python main.py
