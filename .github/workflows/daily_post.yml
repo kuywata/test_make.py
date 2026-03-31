@@ -2,7 +2,7 @@ name: Daily Inburi News
 
 on:
   schedule:
-    # 23:00 UTC = 06:00 น. เวลาไทย
+    # 23:00 UTC = 06:00 น. เวลาประเทศไทย
     - cron: '0 23 * * *'
   workflow_dispatch: 
 
@@ -19,7 +19,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install Libraries
-        # ต้องมี pytz ระบบถึงจะไม่งอแงเรื่องเวลา
+        # ติดตั้งตัวจัดการเวลาและเครื่องมือ AI เวอร์ชันล่าสุด
         run: pip install requests google-genai pytz
 
       - name: Run Main Script
