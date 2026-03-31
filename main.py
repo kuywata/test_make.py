@@ -1,13 +1,13 @@
 import requests
 import feedparser
-from google import genai # เปลี่ยนมาใช้ไลบรารีตัวใหม่
+from google import genai
 import os
 
 # 1. ดึงกุญแจจากตู้เซฟ GitHub 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 
-# 2. ตั้งค่า AI (โค้ดเวอร์ชันใหม่ล่าสุด)
+# 2. ตั้งค่า AI
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 def get_inburi_data():
@@ -30,7 +30,14 @@ def get_inburi_data():
         return "📍 [อัปเดตพื้นที่อินทร์บุรี] (ไม่สามารถดึงข้อมูลได้ในขณะนี้)\n\n"
 
 def get_news_and_summarize():
-    feed = feedparser.parse("https://thaipbs.or.th/rss/news")
+    # แก้ไขจุดที่ 1: เปลี่ยนมาใช้ RSS Feed ของมติชนที่เสถียรกว่า
+    feed_url = "https://www.matichon.co.th/feed"
+    feed = feedparser.parse(feed_url)
+    
+    # แก้ไขจุดที่ 2: เพิ่มระบบดักจับ Error ถ้าดึงข้อมูลข่าวมาไม่ได้เลย
+    if not feed.entries:
+        return "📰 **[สรุปข่าวเด่นเช้านี้]**\n(ระบบไม่สามารถดึงข้อมูลจากสำนักข่าวต้นทางได้ในขณะนี้)\n"
+        
     top_3_news = feed.entries[:3]
     
     raw_news = ""
@@ -45,7 +52,6 @@ def get_news_and_summarize():
     {raw_news}
     """
     
-    # สั่ง AI ด้วยโค้ดโครงสร้างแบบใหม่
     response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt
