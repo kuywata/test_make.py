@@ -33,51 +33,47 @@ def get_water_data():
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
 
-        # 1. ดึงระดับน้ำอินทร์บุรี (thaiwater.net)
+        # 1. เทคนิคขั้นสุดยอด: เปิดเว็บแบบคน แต่ดักฉกข้อมูล API หลังบ้าน!
         try:
-            print("กำลังเข้าเว็บ Thaiwater...")
-            page.goto("https://www.thaiwater.net/water/wl", timeout=60000)
-            # แก้ปัญหา Timeout: บังคับให้รอ 15 วินาที เพื่อให้เว็บโหลดตาราง Javascript จนเสร็จชัวร์ๆ
-            page.wait_for_timeout(15000) 
+            print("กำลังเข้าเว็บ Thaiwater และดักจับ API...")
+            # สั่งให้บอทรอจับไฟล์ JSON ระหว่างที่เว็บกำลังโหลด (ทะลุ WAF และได้เลขเป๊ะๆ 100%)
+            with page.expect_response(re.compile(r".*/public/waterlevel"), timeout=30000) as response_info:
+                page.goto("https://www.thaiwater.net/water/wl", timeout=60000)
             
-            # ดึงข้อความทั้งหน้ามาหาคำว่า สถานีอินทร์บุรี แทนการดักจับ Selector ที่อาจจะคลาดเคลื่อน
-            body_text = page.locator("body").inner_text()
-            
-            # ตัดเอาเฉพาะบรรทัดที่มีคำว่า 'สถานีอินทร์บุรี' หรือ 'C.3'
-            for line in body_text.split('\n'):
-                if 'สถานีอินทร์บุรี' in line and 'แม่น้ำเจ้าพระยา' in line:
-                    # หาตัวเลขทศนิยมในบรรทัดนั้น (มักจะเป็นระดับน้ำ)
-                    nums = re.findall(r'\b\d+\.\d{2}\b', line)
-                    if nums:
-                        wl = float(nums[0])
-                        break
+            data = response_info.value.json()
+            waterlevel_data = data.get('waterlevel_data', [])
+            for s in waterlevel_data:
+                code = s.get('station', {}).get('station_old_code', '')
+                if code == 'C.3':
+                    wl = float(s.get('water_level', 0))
+                if code == 'C.13':
+                    discharge = float(s.get('discharge', 0))
         except Exception as e:
-            print(f"เกิดข้อผิดพลาด Thaiwater: {e}")
+            print(f"เกิดข้อผิดพลาดในการดักจับข้อมูล Thaiwater: {e}")
 
-        # 2. ดึงปริมาณการระบายน้ำ (HII)
-        try:
-            print("กำลังเข้าเว็บ HII...")
-            page.goto("https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php", timeout=60000)
-            # บังคับรอ 10 วินาทีให้โหลดภาพและข้อความเสร็จ
-            page.wait_for_timeout(10000)
-            body_text = page.locator("body").inner_text()
-            match = re.search(r'ท้ายเขื่อนเจ้าพระยา.*?ปริมาณน้ำ\s*([\d\.]+)', body_text, re.DOTALL | re.IGNORECASE)
-            if match:
-                discharge = float(match.group(1))
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาด HII: {e}")
+        # 2. สำรองดึงการระบายน้ำจาก HII (ถ้ายังไม่ได้จาก Thaiwater)
+        if discharge == "รออัปเดต":
+            try:
+                print("กำลังเข้าเว็บ HII สำรอง...")
+                page.goto("https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php", timeout=60000)
+                page.wait_for_timeout(10000)
+                body_text = page.locator("body").inner_text()
+                match = re.search(r'ท้ายเขื่อนเจ้าพระยา.*?ปริมาณน้ำ\s*([\d\.]+)', body_text, re.DOTALL | re.IGNORECASE)
+                if match:
+                    discharge = float(match.group(1))
+            except Exception as e:
+                print(f"เกิดข้อผิดพลาด HII: {e}")
 
         browser.close()
         
     return wl, discharge
 
 if __name__ == "__main__":
-    print("กำลังเปิดเบราว์เซอร์จำลองเพื่อดึงข้อมูล...")
+    print("เริ่มการทำงาน...")
     wl, discharge = get_water_data()
     temp, pm25 = get_weather()
     
     # --------- STATE MANAGEMENT ---------
-    # สร้างไฟล์ state.json หลอกไว้ก่อนถ้ายาวไม่มี เพื่อป้องกัน GitHub พังตอน Git add
     if not os.path.exists(STATE_FILE):
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump({"wl": "รออัปเดต", "discharge": "รออัปเดต"}, f)
@@ -87,12 +83,12 @@ if __name__ == "__main__":
     with open(STATE_FILE, "r", encoding="utf-8") as f:
         old_state = json.load(f)
             
-    # ถ้าค่าไม่ได้มา (รออัปเดต) หรือค่าเท่าเดิมเป๊ะๆ ให้ข้ามการโพสต์
+    # ข้ามการโพสต์ถ้าตัวเลขเหมือนเดิมเป๊ะ หรือดึงไม่ได้ทั้งคู่
     if current_state["wl"] == old_state.get("wl") and current_state["discharge"] == old_state.get("discharge"):
-        print("⚠️ ข้อมูลน้ำไม่มีการเปลี่ยนแปลงจากรอบที่แล้ว หรือดึงข้อมูลไม่ได้ ระบบจะข้ามการโพสต์เพื่อไม่ให้รกเพจ")
+        print(f"⚠️ ข้อมูลไม่มีการเปลี่ยนแปลง (น้ำ: {wl}, ระบาย: {discharge}) ระบบข้ามการโพสต์")
         exit(0)
     else:
-        print("✅ พบการเปลี่ยนแปลงของข้อมูล! กำลังบันทึกค่าใหม่ลง State และส่งโพสต์...")
+        print(f"✅ พบตัวเลขใหม่! (น้ำ: {wl}, ระบาย: {discharge}) กำลังส่งโพสต์...")
         with open(STATE_FILE, "w", encoding="utf-8") as f:
             json.dump(current_state, f)
     # ------------------------------------
