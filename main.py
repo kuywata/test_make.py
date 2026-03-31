@@ -21,92 +21,82 @@ def get_inburi_weather():
         return "N/A", "N/A"
 
 def get_raw_water_data():
-    # ใส่หน้ากากหลอกเว็บรัฐบาลไทยว่าเป็นคนใช้เบราว์เซอร์ Chrome เพื่อป้องกันการโดนบล็อก IP
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': 'https://www.thaiwater.net/water/wl'
     }
     inburi_raw = ""
     chaophraya_raw = ""
     
     try:
-        print("กำลังเจาะทะลุดึงข้อมูลระดับน้ำ...")
+        # เจาะเข้าฐานข้อมูลสถานีวัดน้ำ (Waterlevel API)
         wl_url = "https://www.thaiwater.net/api/v1/thaiwater30/public/waterlevel"
         wl_res = requests.get(wl_url, headers=headers, timeout=15)
-        print(f"สถานะการดึงข้อมูลน้ำ: {wl_res.status_code}") # ถ้าขึ้น 200 คือทะลุสำเร็จ
-        
         if wl_res.status_code == 200:
-            wl_data = wl_res.json()
-            wl_list = wl_data.get('waterlevel_data', wl_data)
+            wl_list = wl_res.json().get('waterlevel_data', [])
             for item in wl_list:
                 item_str = json.dumps(item, ensure_ascii=False)
-                if 'อินทร์บุรี' in item_str:
+                
+                # หาตัวเลขของ "สถานีอินทร์บุรี"
+                if 'สถานีอินทร์บุรี' in item_str or ('อินทร์บุรี' in item_str and 'ระดับน้ำ' in item_str):
                     inburi_raw = item_str
-                    break
-    except Exception as e:
-        print(f"เกิดข้อผิดพลาดการดึงข้อมูลน้ำ: {e}")
-
-    try:
-        print("กำลังเจาะทะลุดึงข้อมูลเขื่อน...")
-        dam_url = "https://www.thaiwater.net/api/v1/thaiwater30/public/dam"
-        dam_res = requests.get(dam_url, headers=headers, timeout=15)
-        print(f"สถานะการดึงข้อมูลเขื่อน: {dam_res.status_code}")
-        
-        if dam_res.status_code == 200:
-            dam_data = dam_res.json()
-            dam_list = dam_data.get('dam_data', dam_data)
-            for item in dam_list:
-                item_str = json.dumps(item, ensure_ascii=False)
-                if 'เจ้าพระยา' in item_str and 'เขื่อน' in item_str:
+                
+                # หาตัวเลขการระบายน้ำของเขื่อนเจ้าพระยา (ซึ่งอยู่ในรหัสสถานี C.13)
+                if 'C.13' in item_str or 'ท้ายเขื่อนเจ้าพระยา' in item_str:
                     chaophraya_raw = item_str
-                    break
     except Exception as e:
-        print(f"เกิดข้อผิดพลาดการดึงข้อมูลเขื่อน: {e}")
-        
+        pass
+
+    # หากยังไม่ได้ข้อมูลเขื่อน ค่อยลองไปเจาะหาใน API เขื่อนใหญ่สำรอง
+    if not chaophraya_raw:
+        try:
+            dam_url = "https://www.thaiwater.net/api/v1/thaiwater30/public/dam"
+            dam_res = requests.get(dam_url, headers=headers, timeout=15)
+            if dam_res.status_code == 200:
+                dam_list = dam_res.json().get('dam_data', [])
+                for item in dam_list:
+                    item_str = json.dumps(item, ensure_ascii=False)
+                    if 'เจ้าพระยา' in item_str:
+                        chaophraya_raw = item_str
+                        break
+        except Exception as e:
+            pass
+            
     return inburi_raw, chaophraya_raw
 
 def generate_local_update(temp, pm25, inburi_raw, chaophraya_raw):
     prompt = f"""
-    คุณคือผู้ช่วยรายงานสถานการณ์ท้องถิ่น อ.อินทร์บุรี จ.สิงห์บุรี ที่รายงานตัวเลขแม่นยำที่สุด
-    วันนี้อุณหภูมิเช้านี้คือ {temp}°C และ PM 2.5 คือ {pm25} μg/m³ 
+    คุณคือผู้ช่วยรายงานสถานการณ์ท้องถิ่น อ.อินทร์บุรี จ.สิงห์บุรี 
+    
+    คำสั่งสำคัญ (ทำตามอย่างเคร่งครัดเพื่อความถูกต้อง 100%):
+    1. ห้ามเดาหรือแต่งตัวเลขเด็ดขาด! ให้ดึงตัวเลขจาก 'ข้อมูลดิบ JSON' ด้านล่างนี้เท่านั้น
+    2. สำหรับระดับน้ำอินทร์บุรี: ให้หาค่าระดับน้ำปัจจุบัน (water_level) จาก JSON 1 
+       - ระดับตลิ่งของอินทร์บุรีคือ 15.10 เมตร ให้คำนวณ: 15.10 - ระดับน้ำปัจจุบัน = ค่าห่างจากตลิ่ง
+    3. สำหรับเขื่อนเจ้าพระยา: ให้หาค่าการระบายน้ำ (discharge, water_flow, หรือ dam_released) จาก JSON 2
+    4. หากใน JSON ไม่มีข้อมูลให้ระบุ หรือคุณหาตัวเลขไม่พบ ให้พิมพ์คำว่า 'รออัปเดตจากกรมชลฯ' ลงไปแทนตัวเลขนั้นทันที 
 
-    ข้อมูลดิบจาก API คลังข้อมูลน้ำแห่งชาติ:
-    - อินทร์บุรี: {inburi_raw if inburi_raw else 'ไม่มีข้อมูลจาก API'}
-    - เขื่อนเจ้าพระยา: {chaophraya_raw if chaophraya_raw else 'ไม่มีข้อมูลจาก API'}
-
-    คำสั่งสำคัญ (ทำตามอย่างเคร่งครัด):
-    1. หากมี "ข้อมูลดิบจาก API" ให้ดึงตัวเลขจากข้อมูลดิบมาใช้ (หา water_level ของอินทร์บุรี และ dam_released ของเขื่อนเจ้าพระยา)
-    2. **สำคัญมาก:** หากข้อมูลดิบขึ้นว่า "ไม่มีข้อมูลจาก API" ให้คุณเปิดใช้เครื่องมือ Google Search ค้นหาข้อมูลล่าสุดของวันนี้เกี่ยวกับ "ระดับน้ำ สถานี C.3 อินทร์บุรี" และ "ปริมาณน้ำระบาย เขื่อนเจ้าพระยา ล่าสุด" จากข่าวเพื่อนำตัวเลขมาเติมให้ครบ ห้ามเว้นว่างเด็ดขาด
-    3. ระดับตลิ่งของสถานีอินทร์บุรีคือ 15.10 เมตรเสมอ ให้คุณนำ 15.10 ลบด้วยระดับน้ำปัจจุบัน เพื่อหาค่า "ห่างจากตลิ่ง"
-
-    รูปแบบโพสต์ที่ต้องการ (ห้ามมีคำเกริ่นนำ ห้ามพิมพ์อธิบายเพิ่ม):
+    รูปแบบโพสต์ที่ต้องการ (พิมพ์ตามนี้เป๊ะๆ ห้ามเพิ่มคำอธิบาย):
     📍 **[อัปเดตพื้นที่อินทร์บุรี]**
     • สภาพอากาศ (ตลาดอินทร์บุรี): อุณหภูมิเช้านี้ {temp}°C
     • คุณภาพอากาศ (PM 2.5): {pm25} μg/m³
-    • ระดับน้ำอินทร์บุรี: ความสูง [ระดับน้ำที่หาได้] ม.รทก. (ห่างจากตลิ่ง [ตัวเลขหลังคำนวณ 15.10 - ระดับน้ำ] เมตร)
-    • เขื่อนเจ้าพระยาปล่อยน้ำ: วันนี้ระบายที่ [ปริมาณวันนี้] ลบ.ม./วินาที (เมื่อวาน [ปริมาณเมื่อวาน] ลบ.ม./วินาที)
+    • ระดับน้ำอินทร์บุรี: ความสูง [ระดับน้ำ] ม.รทก. (ห่างจากตลิ่ง [ผลคำนวณ] เมตร)
+    • เขื่อนเจ้าพระยาปล่อยน้ำ: [ปริมาณระบายน้ำที่หาได้] ลบ.ม./วินาที
+
+    ข้อมูลดิบ JSON 1 (อินทร์บุรี): {inburi_raw if inburi_raw else 'ไม่มีข้อมูล'}
+    ข้อมูลดิบ JSON 2 (เขื่อนเจ้าพระยา / C.13): {chaophraya_raw if chaophraya_raw else 'ไม่มีข้อมูล'}
     """
     
+    # ถอดเครื่องมือค้นหา Google ออก และล็อกค่า AI ไม่ให้แต่งเรื่องเอง (temperature=0.0)
     response = client.models.generate_content(
         model='gemini-2.5-flash',
         contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            temperature=0.1 # บังคับ AI ไม่ให้แต่งเรื่องเอง ให้ยึดตัวเลขเป๊ะๆ
-        )
+        config=types.GenerateContentConfig(temperature=0.0)
     )
     
     return response.text
 
 if __name__ == "__main__":
-    print("1. ดึงข้อมูลสภาพอากาศ...")
     temp, pm25 = get_inburi_weather()
-    
-    print("2. ล้วงข้อมูลตัวเลขระดับน้ำ...")
     inburi_raw, chaophraya_raw = get_raw_water_data()
-    
-    print("3. กำลังให้ AI จัดเรียงตัวเลข (หากเว็บล่ม AI จะค้น Google แทน)...")
     final_post = generate_local_update(temp, pm25, inburi_raw, chaophraya_raw)
     
     final_message = final_post + "\n\n-----------------\n🤖 อัปเดตอัตโนมัติ by Alieninburi\n#อินทร์บุรีรอดมั้ย"
