@@ -19,7 +19,7 @@ jobs:
           python-version: '3.10'
 
       - name: Install Libraries
-        # ติดตั้งตัวจัดการเวลาและเครื่องมือ AI เวอร์ชันล่าสุด
+        # ติดตั้ง pytz เพื่อจัดการเวลา และเครื่องมือดึงข้อมูลให้ครบ
         run: pip install requests google-genai pytz
 
       - name: Run Main Script
