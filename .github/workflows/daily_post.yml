@@ -2,8 +2,8 @@ name: Daily Inburi News
 
 on:
   schedule:
-    # ตั้งเวลาทำงาน 00:00 UTC ซึ่งตรงกับ 07:00 น. เวลาประเทศไทย
-    - cron: '0 0 * * *'
+    # ตั้งเวลาทำงาน 23:00 UTC ซึ่งตรงกับ 06:00 น. เวลาประเทศไทย
+    - cron: '0 23 * * *'
   workflow_dispatch: # ปุ่มสำหรับให้เรากดรันเทสต์ด้วยตัวเอง
 
 jobs:
@@ -19,12 +19,10 @@ jobs:
           python-version: '3.10'
 
       - name: Install Libraries
-        # อัปเดตเครื่องมือ AI เป็น google-genai ตามเวอร์ชันล่าสุดเพื่อแก้ปัญหา Error
         run: pip install requests feedparser google-genai
 
       - name: Run Main Script
         env:
-          # ดึงกุญแจความลับออกจากตู้เซฟมาใช้งาน
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
         run: python main.py
