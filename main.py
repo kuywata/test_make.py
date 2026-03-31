@@ -1,84 +1,88 @@
 import requests
-from google import genai
-from google.genai import types
 import os
 import json
 from datetime import datetime
 import pytz
+from google import genai
 
-# 1. ตั้งค่าพื้นฐานและดึงข้อมูลเวลาปัจจุบัน
+# 1. ตั้งค่า API และดึงกุญแจความลับ
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-# ล็อกโซนเวลาประเทศไทยเพื่อให้ข้อมูล "สดใหม่" ตรงวัน
+# ตั้งค่าเวลาไทย
 tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
-current_date_th = now.strftime("%d %B 2569") 
+date_str = now.strftime("%d %B 2569")
 
-def get_inburi_weather():
-    weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m&timezone=Asia%2FBangkok"
-    aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
-    try:
-        temp = requests.get(weather_url).json()['current']['temperature_2m']
-        pm25 = requests.get(aqi_url).json()['current']['pm2_5']
-        return f"{temp}°C", f"{pm25} μg/m³"
-    except:
-        return "รออัปเดต", "รออัปเดต"
-
-def get_raw_water_data():
+def get_hard_data():
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/123.0.0.0'}
-    inburi_raw, c13_raw = "", ""
+    results = {
+        "inburi_level": "รออัปเดต",
+        "chaophraya_discharge": "รออัปเดต",
+        "temp": "N/A",
+        "pm25": "N/A"
+    }
+
+    # --- ส่วนที่ 1: ดึงระดับน้ำอินทร์บุรีจาก Thaiwater (ตรงตามหน้าเว็บ www.thaiwater.net/water/wl) ---
     try:
+        # ดึงจาก API หลักที่แสดงผลหน้าตาราง
         res = requests.get("https://www.thaiwater.net/api/v1/thaiwater30/public/waterlevel", headers=headers, timeout=15)
         if res.status_code == 200:
             data = res.json().get('waterlevel_data', [])
             for item in data:
-                code = item.get('station', {}).get('station_old_code', '')
-                name = item.get('station', {}).get('station_name', {}).get('th', '')
-                if 'C.3' in code or 'อินทร์บุรี' in name:
-                    inburi_raw = json.dumps(item, ensure_ascii=False)
-                if 'C.13' in code or 'ท้ายเขื่อนเจ้าพระยา' in name:
-                    c13_raw = json.dumps(item, ensure_ascii=False)
-    except:
-        pass
-    return inburi_raw, c13_raw
+                # เจาะจงสถานีอินทร์บุรี (C.3)
+                if 'อินทร์บุรี' in item.get('station', {}).get('station_name', {}).get('th', ''):
+                    results["inburi_level"] = float(item.get('water_level', 0))
+                    break
+    except: pass
 
-def generate_water_summary(inburi_raw, c13_raw):
-    # คำสั่งล็อก AI ให้หาข้อมูลของ "วันนี้" เท่านั้น
-    prompt = f"""
-    วันนี้คือวันที่ {current_date_th} (ปี 2569) เวลาปัจจุบัน {now.strftime('%H:%M น.')}
-    
-    คำสั่งเด็ดขาด: 
-    1. รายงานสถานการณ์น้ำต้องเป็นข้อมูลล่าสุดของวันนี้ ({current_date_th}) เท่านั้น ห้ามใช้ข้อมูลเก่าของวันที่ 29 หรือ 30 มาตอบเด็ดขาด
-    2. ถ้าในระบบ API ไม่มีข้อมูลของวันนี้ ให้คุณใช้ Google Search ค้นหา "รายงานสถานการณ์น้ำลุ่มเจ้าพระยา วันนี้" เพื่อเอาตัวเลขจริงมาตอบ
-    3. ระดับตลิ่งอินทร์บุรีคือ 13.10 เมตร (คำนวณ: 13.10 - ระดับน้ำปัจจุบัน)
+    # --- ส่วนที่ 2: ดึงการระบายน้ำเขื่อนเจ้าพระยาจาก HII (ตรงตามแผนภาพ tiwrm.hii.or.th) ---
+    try:
+        # ใช้ API เดียวกันแต่หาค่าระบายน้ำ (Discharge) ของสถานี C.13 ท้ายเขื่อน
+        res = requests.get("https://www.thaiwater.net/api/v1/thaiwater30/public/waterlevel", headers=headers, timeout=15)
+        if res.status_code == 200:
+            data = res.json().get('waterlevel_data', [])
+            for item in data:
+                if 'C.13' in item.get('station', {}).get('station_old_code', ''):
+                    results["chaophraya_discharge"] = float(item.get('discharge', 0))
+                    break
+    except: pass
 
-    รูปแบบโพสต์:
-    รายงานสถานการณ์น้ำประจำวันที่ {current_date_th}
-    • ระดับน้ำอินทร์บุรี: ความสูง [เลข] ม.รทก. (ห่างจากตลิ่ง [เลข] เมตร)
-    • เขื่อนเจ้าพระยาปล่อยน้ำ: วันนี้ [เลข] ลบ.ม./วินาที (เมื่อวาน [เลข] ลบ.ม./วินาที)
+    # --- ส่วนที่ 3: ดึงอากาศและฝุ่นตลาดอินทร์บุรี ---
+    try:
+        weather = requests.get("https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,pm2_5&timezone=Asia%2FBangkok").json()
+        results["temp"] = weather['current']['temperature_2m']
+        results["pm25"] = weather['current'].get('pm2_5', 'N/A')
+    except: pass
 
-    ข้อมูลดิบ API:
-    - C.3: {inburi_raw if inburi_raw else 'ไม่มีข้อมูล'}
-    - C.13: {c13_raw if c13_raw else 'ไม่มีข้อมูล'}
-    """
-    
-    response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(tools=[types.Tool(google_search=types.GoogleSearch())])
-    )
-    return response.text
+    return results
 
 if __name__ == "__main__":
-    temp, pm25 = get_inburi_weather()
-    inburi_raw, c13_raw = get_raw_water_data()
-    water_summary = generate_water_summary(inburi_raw, c13_raw)
+    # ดึงข้อมูลดิบ
+    data = get_hard_data()
     
-    final_message = f"📍 **[อัปเดตพื้นที่อินทร์บุรี]**\n"
-    final_message += f"• สภาพอากาศ (ตลาดอินทร์บุรี): อุณหภูมิเช้านี้ {temp}\n"
-    final_message += f"• คุณภาพอากาศ (PM 2.5): {pm25}\n"
-    final_message += f"{water_summary.strip()}\n\n#อินทร์บุรีรอดมั้ย"
+    # คำนวณความห่างตลิ่ง (ใช้เกณฑ์ 13.10 เมตรตามที่สั่ง)
+    bank_level = 13.10
+    try:
+        distance_from_bank = round(bank_level - data["inburi_level"], 2)
+        wl_display = f"{data['inburi_level']} ม.รทก. (ห่างจากตลิ่ง {distance_from_bank} เมตร)"
+    except:
+        wl_display = "รออัปเดตข้อมูล ม.รทก."
+
+    # ใช้ AI แค่จัดรูปแบบข้อความจากตัวเลขที่เราดึงมาให้ (ห้ามให้ AI ไปหาเอง)
+    prompt = f"""
+    วันนี้วันที่ {date_str} เวลา {now.strftime('%H:%M น.')}
+    รายงานข้อมูลต่อไปนี้ให้ชาวบ้านอินทร์บุรี (ห้ามมโนตัวเลขเองเด็ดขาด):
+    - อุณหภูมิ: {data['temp']}°C
+    - ฝุ่น PM 2.5: {data['pm25']} μg/m³
+    - ระดับน้ำอินทร์บุรี: {wl_display}
+    - การระบายน้ำเขื่อนเจ้าพระยา: {data['chaophraya_discharge']} ลบ.ม./วินาที
+
+    จัดรูปแบบโพสต์ให้สั้น กระชับ แข็งแรง ตามสไตล์เพจอินทร์บุรีรอดมั้ย โดยเริ่มที่หัวข้อทันที
+    """
+
+    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
     
-    requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_message})
+    # ส่งเข้า Make.com
+    requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": response.text + "\n\n#อินทร์บุรีรอดมั้ย"})
