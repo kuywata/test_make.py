@@ -5,7 +5,6 @@ on:
     - cron: '0 23 * * *'
   workflow_dispatch: 
 
-# ต้องเพิ่มสิทธิ์เขียน เพื่อให้ระบบอัปเดตไฟล์ state.json กลับเข้า Repository ได้
 permissions:
   contents: write
 
@@ -25,7 +24,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install requests google-genai pytz playwright
-          # คำสั่งนี้สำคัญมาก: เป็นการจำลองลง Google Chrome ไว้บน GitHub 
           playwright install chromium --with-deps
 
       - name: Run Main Script
@@ -38,6 +36,7 @@ jobs:
         run: |
           git config --global user.name 'github-actions[bot]'
           git config --global user.email 'github-actions[bot]@users.noreply.github.com'
+          # สร้างไฟล์ไว้ก่อนเสมอ เพื่อป้องกัน Error "pathspec 'state.json' did not match any files"
+          touch state.json
           git add state.json
-          # ถ้ามีไฟล์ state.json อัปเดต ให้ commit และ push กลับเข้าไปที่ GitHub อัตโนมัติ
           git diff --quiet && git diff --staged --quiet || (git commit -m "อัปเดต State บันทึกข้อมูลน้ำล่าสุด" && git push)
