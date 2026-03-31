@@ -1,0 +1,23 @@
+name: Test Make Webhook
+
+# ตั้งค่าให้เราสามารถกดรันแบบ Manual ได้
+on:
+  workflow_dispatch: 
+
+jobs:
+  test_post:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v3
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Install requests library
+        run: pip install requests
+
+      - name: Run Test Script
+        run: python test_make.py
