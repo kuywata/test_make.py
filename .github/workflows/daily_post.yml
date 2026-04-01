@@ -31,4 +31,5 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}  # <--- เพิ่มบรรทัดนี้เข้ามาให้แล้วครับ
         run: python main.py
