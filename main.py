@@ -19,13 +19,34 @@ now = datetime.now(tz)
 date_str = now.strftime("%d %B 2569")
 time_str = now.strftime("%H:%M น.")
 
-# --- 1. ดึงสภาพอากาศ ---
+# --- 1. ดึงสภาพอากาศ (อัปเดตเพิ่ม อุณหภูมิ, ฝุ่น, โอกาสฝนตก, ความชื้น, ความเร็วลม) ---
 def get_weather():
+    TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
+    tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
+    pm_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
+    
     try:
-        w = requests.get("https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,pm2_5&timezone=Asia%2FBangkok").json()
-        return w['current']['temperature_2m'], w['current'].get('pm2_5', 'N/A')
-    except:
-        return "N/A", "N/A"
+        # ดึงข้อมูลจาก Tomorrow.io
+        res = requests.get(tmr_url).json()
+        current_data = res['timelines']['minutely'][0]['values']
+        
+        temp = round(current_data['temperature'], 1)
+        humidity = round(current_data['humidity'], 1)
+        wind = round(current_data['windSpeed'], 1) # หน่วยเป็น m/s
+        
+        # หาโอกาสฝนตกสูงสุดใน 12 ชั่วโมงข้างหน้า
+        hourly_data = res['timelines']['hourly'][:12]
+        rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
+        rain_prob = max(rain_probs)
+
+        # ดึงข้อมูลฝุ่นจาก Open-Meteo
+        pm_res = requests.get(pm_url).json()
+        pm25 = pm_res['current'].get('pm2_5', 'N/A')
+
+        return temp, pm25, rain_prob, humidity, wind
+    except Exception as e:
+        print(f"เกิดข้อผิดพลาดในการดึงสภาพอากาศ: {e}")
+        return "N/A", "N/A", "N/A", "N/A", "N/A"
 
 # --- 2. ดึงระดับน้ำอินทร์บุรี (ท่าไม้ตายของพี่: เจาะเว็บสาขาสิงห์บุรี) ---
 def get_inburi_data():
@@ -38,7 +59,6 @@ def get_inburi_data():
         page = browser.new_page()
         try:
             page.goto(url, timeout=60000)
-            # รอให้ตารางปรากฏ
             page.wait_for_selector("th[scope='row']", timeout=30000)
             html = page.content()
             
@@ -60,7 +80,7 @@ def get_inburi_data():
                             continue
                             
                     if numeric_values:
-                        water_level = numeric_values[0] # ดึงค่าตัวเลขแรกที่เจอ (ระดับน้ำ)
+                        water_level = numeric_values[0]
                         break
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
@@ -81,7 +101,6 @@ def fetch_chao_phraya_dam_discharge():
         response = requests.get(url, headers=headers, timeout=20)
         response.encoding = 'utf-8'
         
-        # ตัดเอาเฉพาะ json_data ในโค้ดแบบที่พี่ทำเป๊ะๆ
         match = re.search(r'var json_data = (\[.*\]);', response.text)
         if match:
             json_string = match.group(1)
@@ -101,8 +120,8 @@ def fetch_chao_phraya_dam_discharge():
 if __name__ == "__main__":
     print("=== เริ่มใช้ตรรกะเจาะข้อมูลระดับเทพ ===")
     
-    # 1. รวบรวมข้อมูล
-    temp, pm25 = get_weather()
+    # 1. รวบรวมข้อมูล (รับค่าสภาพอากาศมา 5 ตัว)
+    temp, pm25, rain_prob, humidity, wind = get_weather()
     wl, bank_level = get_inburi_data()
     discharge = fetch_chao_phraya_dam_discharge()
     
@@ -115,29 +134,30 @@ if __name__ == "__main__":
         
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
 
-    # 3. เตรียมโพสต์
+    # 3. เตรียมโพสต์ (รักษาโครงสร้างเดิม 100% แต่ปรับให้ AI สรุปอากาศสั้นๆ)
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" ที่คอยอัปเดตข่าวสารให้ชาวบ้านอินทร์บุรีแบบเป็นกันเอง ภาษาอ่านง่าย ไม่เป็นทางการเกินไป และไม่จำเจ
     
     ข้อมูลดิบวันนี้:
     - วันที่: {date_str} เวลา {time_str}
-    - อุณหภูมิ: {temp}°C
+    - อุณหภูมิ: {temp}°C, ความชื้น: {humidity}%, ลม: {wind} m/s
+    - โอกาสฝนตก: {rain_prob}%
     - ฝุ่น PM 2.5: {pm25} μg/m³
     - ระดับน้ำอินทร์บุรี: {wl_text}
     - ระบายน้ำเขื่อนเจ้าพระยา: {discharge_text}
 
     กฎการเขียนโพสต์:
     1. นำข้อมูลดิบมาเรียบเรียงใหม่ให้เป็นธรรมชาติ เพิ่มคำขยายความให้เห็นภาพตามความเป็นจริง เช่น:
-       - อากาศ/ฝุ่น: ถ้าร้อนให้บอกว่า "อากาศร้อน", ถ้าฝุ่นน้อย/ไม่มีฝุ่น ให้บอกว่า "คุณภาพอากาศดีมาก"
+       - อากาศ/ฝน/ลม: ให้สรุปสั้นๆ กระชับที่สุด ไม่ต้องร่ายยาว ถ้าร้อน+ชื้นให้บอก "ร้อนอบอ้าว", มีลมบอก "ลมพัดเย็นๆ", ถ้าโอกาสฝนสูงให้เตือนพกร่มสั้นๆ, ถ้าฝุ่นน้อยให้บอกอากาศดี
        - ระดับน้ำ: ถ้ายังห่างตลิ่งเยอะ ให้เสริมว่า "น้ำยังอยู่ในระดับต่ำ ปลอดภัย" หรือ "ยังห่างตลิ่งอีกเยอะ สบายใจได้"
        - เขื่อนเจ้าพระยา: ถ้าระบายน้ำน้อย (เช่น ต่ำกว่า 700) ให้บอกว่า "เป็นระดับปกติ ไม่ได้มีการเร่งระบายน้ำแต่อย่างใด"
     2. ห้ามใช้คำลงท้ายว่า "ครับ", "ค่ะ", "ครับ/ค่ะ" แบบหุ่นยนต์เด็ดขาด ให้ใช้ภาษาเล่าเรื่องแบบเป็นธรรมชาติแทน
     3. พยายามสับเปลี่ยนคำศัพท์และรูปประโยคในแต่ละวันไม่ให้ซ้ำซากจำเจ
-    4. ให้ผลลัพธ์ออกมาตามโครงสร้างนี้เป๊ะๆ:
+    4. ให้ผลลัพธ์ออกมาตามโครงสร้างนี้เป๊ะๆ (ห้ามปรับเปลี่ยนรูปแบบหัวข้อเด็ดขาด):
 
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
     
-    🌡️ **สภาพอากาศ:** [อธิบายอุณหภูมิและฝุ่นแบบเป็นธรรมชาติ]
+    🌡️ **สภาพอากาศ:** [สรุปอุณหภูมิ ฝน ลม ฝุ่น แบบสั้น กระชับ เป็นธรรมชาติ]
     🌊 **ระดับน้ำอินทร์บุรี:** [บอกตัวเลข พร้อมประโยคเสริมความอุ่นใจหรือแจ้งเตือน]
     🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [บอกตัวเลข และวิเคราะห์ว่าเป็นระดับปกติหรือไม่]
 
