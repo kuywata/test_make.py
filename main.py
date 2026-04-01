@@ -19,33 +19,36 @@ now = datetime.now(tz)
 date_str = now.strftime("%d %B 2569")
 time_str = now.strftime("%H:%M น.")
 
-# --- 1. ดึงสภาพอากาศ (อัปเดตเพิ่ม อุณหภูมิ, ฝุ่น, โอกาสฝนตก, ความชื้น, ความเร็วลม) ---
+# --- 1. ดึงสภาพอากาศ (ลูกผสม: อุณหภูมิ/ฝุ่นจาก Open-Meteo, ฝน/ลม/ชื้นจาก Tomorrow.io) ---
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
+    
+    # URL 1: ดึงฝน ลม ความชื้น จาก Tomorrow.io (แม่นยำเรื่องฝนเฉพาะจุด)
     tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-    pm_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
+    # URL 2: ดึงอุณหภูมิ และ PM 2.5 จาก Open-Meteo (อุณหภูมิตรงกับความรู้สึกและแอปทั่วไปมากกว่า)
+    om_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,pm2_5&timezone=Asia%2FBangkok"
     
     try:
-        # ดึงข้อมูลจาก Tomorrow.io
-        res = requests.get(tmr_url).json()
-        current_data = res['timelines']['minutely'][0]['values']
+        # 1.1 ดึงข้อมูลพายุ ฝนเฉพาะจุด ลม และความชื้น (Tomorrow.io)
+        tmr_res = requests.get(tmr_url).json()
+        current_data = tmr_res['timelines']['minutely'][0]['values']
         
-        temp = round(current_data['temperature'], 1)
         humidity = round(current_data['humidity'], 1)
         wind = round(current_data['windSpeed'], 1) # หน่วยเป็น m/s
         
         # หาโอกาสฝนตกสูงสุดใน 12 ชั่วโมงข้างหน้า
-        hourly_data = res['timelines']['hourly'][:12]
+        hourly_data = tmr_res['timelines']['hourly'][:12]
         rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
         rain_prob = max(rain_probs)
 
-        # ดึงข้อมูลฝุ่นจาก Open-Meteo
-        pm_res = requests.get(pm_url).json()
-        pm25 = pm_res['current'].get('pm2_5', 'N/A')
+        # 1.2 ดึงอุณหภูมิและฝุ่น (Open-Meteo)
+        om_res = requests.get(om_url).json()
+        temp = om_res['current']['temperature_2m']
+        pm25 = om_res['current'].get('pm2_5', 'N/A')
 
         return temp, pm25, rain_prob, humidity, wind
     except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการดึงสภาพอากาศ: {e}")
+        print(f"เกิดข้อผิดพลาดในการดึงสภาพอากาศแบบลูกผสม: {e}")
         return "N/A", "N/A", "N/A", "N/A", "N/A"
 
 # --- 2. ดึงระดับน้ำอินทร์บุรี (ท่าไม้ตายของพี่: เจาะเว็บสาขาสิงห์บุรี) ---
