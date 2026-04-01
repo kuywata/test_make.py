@@ -167,7 +167,7 @@ if __name__ == "__main__":
     📌 **สรุป:** [สรุปภาพรวมสั้นๆ 1-2 บรรทัด แบบเป็นกันเองให้ชาวบ้านสบายใจ]
     """
     
-    response = client.models.generate_content(model='gemini-1.5-flash', contents=prompt)
+    response = client.models.generate_content(model='gemini-2.0-flash', contents=prompt)
     final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย"
     
     print("\nข้อความที่จะโพสต์:\n", final_post)
