@@ -25,9 +25,9 @@ def get_weather():
     
     # URL 1: ดึงฝน ลม ความชื้น (Tomorrow.io)
     tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-    # URL 2: ดึงอุณหภูมิ และ UV (Open-Meteo Weather)
+    # URL 2: ดึงอุณหภูมิ และ UV (Open-Meteo Weather API)
     om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
-    # URL 3: ดึงฝุ่น PM 2.5 (Open-Meteo Air Quality)
+    # URL 3: ดึงฝุ่น PM 2.5 โดยเฉพาะ (Open-Meteo Air Quality API)
     om_aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
     
     try:
@@ -142,7 +142,7 @@ if __name__ == "__main__":
         
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
 
-    # 3. เตรียมโพสต์ (ปรับ Prompt เรื่องฝุ่น)
+    # 3. เตรียมโพสต์
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" ที่คอยอัปเดตข่าวสารให้ชาวบ้านอินทร์บุรีแบบเป็นกันเอง ภาษาอ่านง่าย ไม่เป็นทางการเกินไป และไม่จำเจ
     
