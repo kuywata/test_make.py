@@ -2,8 +2,10 @@ name: Daily Inburi News
 
 on:
   schedule:
-    # เพิ่มเวลา 08:00 UTC (บ่าย 3 ไทย) และ 23:00 UTC (6 โมงเช้าไทย)
-    - cron: '0 8,23 * * *'
+    # รอบ 06:00 น. และ 16:00 น. (นาทีที่ 0)
+    - cron: '0 9,23 * * *'
+    # รอบ 10:30 น. (นาทีที่ 30)
+    - cron: '30 3 * * *'
   workflow_dispatch: 
 
 jobs:
@@ -31,5 +33,5 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
-          TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}  # <--- เพิ่มบรรทัดนี้เข้ามาให้แล้วครับ
+          TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
         run: python main.py
