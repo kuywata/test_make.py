@@ -2,12 +2,16 @@ name: Daily Inburi News
 
 on:
   schedule:
-    - cron: '0 23 * * *'
+    # เพิ่มเวลา 08:00 UTC (บ่าย 3 ไทย) และ 23:00 UTC (6 โมงเช้าไทย)
+    - cron: '0 8,23 * * *'
   workflow_dispatch: 
 
 jobs:
   post_news:
     runs-on: ubuntu-latest
+    env:
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+      
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
@@ -20,9 +24,7 @@ jobs:
       - name: Install Libraries & Playwright
         run: |
           python -m pip install --upgrade pip
-          # ติดตั้งเครื่องมือทั้งหมด รวมถึง BeautifulSoup ของ ChatGPT และ Playwright ของผม
           pip install requests google-genai pytz beautifulsoup4 playwright
-          # จำลองเบราว์เซอร์ Chrome ขึ้นมาบนเซิร์ฟเวอร์เพื่อหลอกเว็บรัฐบาล
           playwright install chromium --with-deps
 
       - name: Run Main Script
