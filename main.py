@@ -19,44 +19,48 @@ now = datetime.now(tz)
 date_str = now.strftime("%d %B 2569")
 time_str = now.strftime("%H:%M น.")
 
-# --- 1. ดึงสภาพอากาศ (ลูกผสม: อุณหภูมิ/ฝุ่น/UVจาก Open-Meteo, ฝน/ลม/ชื้นจาก Tomorrow.io) ---
+# --- 1. ดึงสภาพอากาศ (ลูกผสมสมบูรณ์แบบ: แยกดึงอากาศ กับ ดึงฝุ่น ป้องกัน Error) ---
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
     
-    # URL 1: ดึงฝน ลม ความชื้น จาก Tomorrow.io (แม่นยำเรื่องฝนเฉพาะจุด)
+    # URL 1: ดึงฝน ลม ความชื้น (Tomorrow.io)
     tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-    # URL 2: ดึงอุณหภูมิ PM 2.5 และเพิ่ม UV Index จาก Open-Meteo
-    om_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,pm2_5,uv_index&timezone=Asia%2FBangkok"
+    # URL 2: ดึงอุณหภูมิ และ UV (Open-Meteo Weather)
+    om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
+    # URL 3: ดึงฝุ่น PM 2.5 (Open-Meteo Air Quality)
+    om_aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
     
     try:
-        # 1.1 ดึงข้อมูลพายุ ฝนเฉพาะจุด ลม และความชื้น (Tomorrow.io)
+        # 1.1 ดึงข้อมูลฝนเฉพาะจุด ลม และความชื้น (Tomorrow.io)
         tmr_res = requests.get(tmr_url).json()
         current_data = tmr_res['timelines']['minutely'][0]['values']
         
         humidity = round(current_data['humidity'], 1)
-        wind = round(current_data['windSpeed'], 1) # หน่วยเป็น m/s
+        wind = round(current_data['windSpeed'], 1) 
         
-        # หาโอกาสฝนตกสูงสุดใน 12 ชั่วโมงข้างหน้า
         hourly_data = tmr_res['timelines']['hourly'][:12]
         rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
         rain_prob = max(rain_probs)
 
-        # 1.2 ดึงอุณหภูมิ ฝุ่น และ UV (Open-Meteo)
-        om_res = requests.get(om_url).json()
-        temp = om_res['current']['temperature_2m']
-        pm25 = om_res['current'].get('pm2_5', 'N/A')
-        uv = om_res['current'].get('uv_index', 'N/A') # ดึงค่า UV เพิ่มเข้ามา
+        # 1.2 ดึงอุณหภูมิ และ UV (Open-Meteo Weather)
+        w_res = requests.get(om_weather_url).json()
+        temp = w_res['current']['temperature_2m']
+        uv = w_res['current'].get('uv_index', 'N/A')
+
+        # 1.3 ดึงฝุ่น PM 2.5 (Open-Meteo AQI)
+        aqi_res = requests.get(om_aqi_url).json()
+        pm25 = aqi_res['current'].get('pm2_5', 'N/A')
 
         return temp, pm25, rain_prob, humidity, wind, uv
     except Exception as e:
         print(f"เกิดข้อผิดพลาดในการดึงสภาพอากาศแบบลูกผสม: {e}")
         return "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
 
-# --- 2. ดึงระดับน้ำอินทร์บุรี (ท่าไม้ตายของพี่: เจาะเว็บสาขาสิงห์บุรี) ---
+# --- 2. ดึงระดับน้ำอินทร์บุรี (เจาะเว็บสาขาสิงห์บุรี) ---
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
     water_level = None
-    bank_level = 13.10 # ใช้ 13.10 ตามที่ตกลงกันไว้
+    bank_level = 13.10 
     
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
@@ -93,7 +97,7 @@ def get_inburi_data():
             
     return water_level, bank_level
 
-# --- 3. ดึงเขื่อนเจ้าพระยา (ท่าไม้ตายของพี่: ล้วงตัวแปร json_data) ---
+# --- 3. ดึงเขื่อนเจ้าพระยา (ล้วงตัวแปร json_data) ---
 def fetch_chao_phraya_dam_discharge():
     url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
     headers = {
@@ -124,7 +128,7 @@ def fetch_chao_phraya_dam_discharge():
 if __name__ == "__main__":
     print("=== เริ่มใช้ตรรกะเจาะข้อมูลระดับเทพ ===")
     
-    # 1. รวบรวมข้อมูล (รับค่าสภาพอากาศมา 6 ตัว)
+    # 1. รวบรวมข้อมูล
     temp, pm25, rain_prob, humidity, wind, uv = get_weather()
     wl, bank_level = get_inburi_data()
     discharge = fetch_chao_phraya_dam_discharge()
@@ -138,7 +142,7 @@ if __name__ == "__main__":
         
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
 
-    # 3. เตรียมโพสต์ (รักษาโครงสร้างเดิม 100% เพิ่มคำสั่งให้ AI วิเคราะห์ UV)
+    # 3. เตรียมโพสต์ (ปรับ Prompt เรื่องฝุ่น)
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" ที่คอยอัปเดตข่าวสารให้ชาวบ้านอินทร์บุรีแบบเป็นกันเอง ภาษาอ่านง่าย ไม่เป็นทางการเกินไป และไม่จำเจ
     
@@ -147,13 +151,15 @@ if __name__ == "__main__":
     - อุณหภูมิ: {temp}°C, ความชื้น: {humidity}%, ลม: {wind} m/s
     - ดัชนี UV (ความแรงแดด): {uv}
     - โอกาสฝนตก: {rain_prob}%
-    - ฝุ่น PM 2.5: {pm25} μg/m³
+    - ฝุ่น PM 2.5: {pm25} μg/m³ (ข้อมูลนี้ให้ใช้ประเมินสถานการณ์เท่านั้น ห้ามพิมพ์ตัวเลขนี้ลงในโพสต์เด็ดขาด)
     - ระดับน้ำอินทร์บุรี: {wl_text}
     - ระบายน้ำเขื่อนเจ้าพระยา: {discharge_text}
 
-    กฎการเขียนโพสต์:
+    กฎการเขียนโพสต์ (สำคัญมาก):
     1. นำข้อมูลดิบมาเรียบเรียงใหม่ให้เป็นธรรมชาติ เพิ่มคำขยายความให้เห็นภาพตามความเป็นจริง เช่น:
-       - อากาศ/ฝน/ลม/UV: ให้สรุปสั้นๆ กระชับที่สุด ไม่ต้องร่ายยาว ถ้าร้อน+ชื้นให้บอก "ร้อนอบอ้าว", มีลมบอก "ลมพัดเย็นๆ", ถ้า UV สูง (เกิน 8) ให้เตือนว่าแดดแรงแสบผิวอย่าลืมกันแดด, ถ้าโอกาสฝนสูงให้เตือนพกร่มสั้นๆ, ถ้าฝุ่นน้อยให้บอกอากาศดี
+       - อากาศและฝน: ถ้าร้อน+ชื้นให้บอก "ร้อนอบอ้าว", มีลมบอก "ลมพัดเย็นๆ", ถ้าโอกาสฝนสูงให้เตือนพกร่มสั้นๆ
+       - เรื่องฝุ่น PM 2.5: **ห้ามระบุตัวเลขค่าฝุ่นเด็ดขาด** (เพราะเพจมีโพสต์แจ้งตัวเลขแยกต่างหากแล้ว) ให้อธิบายเป็นความรู้สึกสั้นๆ เช่น "อากาศโปร่งหายใจโล่ง" (ถ้าฝุ่นน้อย) หรือ "วันนี้ฝุ่นเริ่มเยอะ" (ถ้าฝุ่นเยอะ)
+       - UV: ถ้า UV สูง (เกิน 8) ให้เตือนสั้นๆ ว่าแดดแรงแสบผิว
        - ระดับน้ำ: ถ้ายังห่างตลิ่งเยอะ ให้เสริมว่า "น้ำยังอยู่ในระดับต่ำ ปลอดภัย" หรือ "ยังห่างตลิ่งอีกเยอะ สบายใจได้"
        - เขื่อนเจ้าพระยา: ถ้าระบายน้ำน้อย (เช่น ต่ำกว่า 700) ให้บอกว่า "เป็นระดับปกติ ไม่ได้มีการเร่งระบายน้ำแต่อย่างใด"
     2. ห้ามใช้คำลงท้ายว่า "ครับ", "ค่ะ", "ครับ/ค่ะ" แบบหุ่นยนต์เด็ดขาด ให้ใช้ภาษาเล่าเรื่องแบบเป็นธรรมชาติแทน
@@ -162,7 +168,7 @@ if __name__ == "__main__":
 
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
     
-    🌡️ **สภาพอากาศ:** [สรุปอุณหภูมิ UV ฝน ลม ฝุ่น แบบสั้น กระชับ เป็นธรรมชาติ]
+    🌡️ **สภาพอากาศ:** [สรุปอุณหภูมิ UV ฝน ลม และอธิบายเรื่องฝุ่นโดยห้ามใส่ตัวเลข แบบสั้น กระชับ เป็นธรรมชาติ]
     🌊 **ระดับน้ำอินทร์บุรี:** [บอกตัวเลข พร้อมประโยคเสริมความอุ่นใจหรือแจ้งเตือน]
     🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [บอกตัวเลข และวิเคราะห์ว่าเป็นระดับปกติหรือไม่]
 
