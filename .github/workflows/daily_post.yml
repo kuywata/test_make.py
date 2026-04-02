@@ -1,11 +1,7 @@
 name: Daily Inburi News
 
 on:
-  schedule:
-    # รอบ 06:00 น. และ 16:00 น. (นาทีที่ 0)
-    - cron: '0 9,23 * * *'
-    # รอบ 10:30 น. (นาทีที่ 30)
-    - cron: '30 3 * * *'
+  
   workflow_dispatch: 
 
 jobs:
