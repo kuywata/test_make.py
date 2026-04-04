@@ -91,41 +91,46 @@ def get_inburi_data():
             
     return water_level, bank_level
 
-# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (ดึงจากเว็บ tiwrm.hii.or.th ตามคำสั่ง) ---
+# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (ดักเว็บ tiwrm แบบมี Proxy Backup ทะลุบล็อก) ---
 def fetch_chao_phraya_dam_discharge():
     print("▶️ กำลังดึงข้อมูลเขื่อนเจ้าพระยาจากเว็บ tiwrm.hii.or.th...")
     url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     }
     
     try:
-        response = requests.get(url, headers=headers, timeout=30)
-        # เผื่อเว็บมีการบล็อก IP ต่างประเทศ ค่อยสลับไปใช้ Proxy กันเหนียว
-        if response.status_code != 200:
-            print(f"⚠️ เซิร์ฟเวอร์ตอบกลับรหัส {response.status_code} กำลังสลับไปใช้ Proxy...")
-            proxy_url = f"https://api.allorigins.win/get?url={url}"
-            response = requests.get(proxy_url, timeout=30)
-            html = response.json().get('contents', '')
-        else:
-            response.encoding = 'utf-8'
-            html = response.text
-
-        soup = BeautifulSoup(html, "html.parser")
+        # แผน A: ดึงตรงๆ ก่อน
+        response = requests.get(url, headers=headers, timeout=20)
+        response.encoding = 'utf-8'
+        soup = BeautifulSoup(response.text, "html.parser")
         
-        # เจาะเข้า ID C13 ตามโครงสร้างเว็บเป๊ะๆ
+        # ค้นหากล่อง C13
         c13_box = soup.find("div", id="C13")
+        
+        # ถ้าหาไม่เจอ (โดนเว็บหลอกส่งหน้าขาวมาให้ เพราะบล็อก IP ต่างประเทศ)
+        if not c13_box:
+            print("⚠️ เข้าเว็บได้แต่ไม่พบตาราง C.13 (โดนบล็อก IP) กำลังบังคับสลับไปใช้ Proxy...")
+            import urllib.parse
+            # ครอบ URL ด้วย Proxy ของ AllOrigins เพื่อแปลงสัญชาติบอทให้เป็นคนทั่วไป
+            proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(url)}"
+            response_proxy = requests.get(proxy_url, timeout=30)
+            html = response_proxy.json().get('contents', '')
+            soup = BeautifulSoup(html, "html.parser")
+            c13_box = soup.find("div", id="C13") # ค้นหาใหม่อีกรอบ
+            
         if c13_box:
             tds = c13_box.find_all("td")
             for i, td in enumerate(tds):
                 if "ปริมาณน้ำ" in td.get_text(strip=True):
-                    # ข้อมูลจะอยู่ในช่องถัดไปหน้าตาแบบนี้: "300.00/ 2840 cms"
                     val_text = tds[i+1].get_text(strip=True).split('/')[0]
                     cleaned = re.sub(r"[^0-9\.]", "", val_text)
                     if cleaned:
                         val = float(cleaned)
                         print(f"✅ สำเร็จ! ดึงข้อมูลการปล่อยน้ำได้: {val}")
                         return val
+        else:
+            print("❌ หาตาราง C.13 ไม่เจอเลยแม้จะทะลวงด้วย Proxy แล้ว")
                         
     except Exception as e:
         print(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลเขื่อน: {e}")
