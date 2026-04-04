@@ -19,22 +19,17 @@ now = datetime.now(tz)
 date_str = now.strftime("%d %B 2569")
 time_str = now.strftime("%H:%M น.")
 
-# --- 1. ดึงสภาพอากาศ (ลูกผสมสมบูรณ์แบบ: แยกดึงอากาศ กับ ดึงฝุ่น ป้องกัน Error) ---
+# --- 1. ดึงสภาพอากาศ ---
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
     
-    # URL 1: ดึงฝน ลม ความชื้น (Tomorrow.io)
     tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-    # URL 2: ดึงอุณหภูมิ และ UV (Open-Meteo Weather API)
     om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
-    # URL 3: ดึงฝุ่น PM 2.5 โดยเฉพาะ (Open-Meteo Air Quality API)
     om_aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
     
     try:
-        # 1.1 ดึงข้อมูลฝนเฉพาะจุด ลม และความชื้น (Tomorrow.io)
         tmr_res = requests.get(tmr_url).json()
         current_data = tmr_res['timelines']['minutely'][0]['values']
-        
         humidity = round(current_data['humidity'], 1)
         wind = round(current_data['windSpeed'], 1) 
         
@@ -42,21 +37,19 @@ def get_weather():
         rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
         rain_prob = max(rain_probs)
 
-        # 1.2 ดึงอุณหภูมิ และ UV (Open-Meteo Weather)
         w_res = requests.get(om_weather_url).json()
         temp = w_res['current']['temperature_2m']
         uv = w_res['current'].get('uv_index', 'N/A')
 
-        # 1.3 ดึงฝุ่น PM 2.5 (Open-Meteo AQI)
         aqi_res = requests.get(om_aqi_url).json()
         pm25 = aqi_res['current'].get('pm2_5', 'N/A')
 
         return temp, pm25, rain_prob, humidity, wind, uv
     except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการดึงสภาพอากาศแบบลูกผสม: {e}")
+        print(f"เกิดข้อผิดพลาดสภาพอากาศ: {e}")
         return "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
 
-# --- 2. ดึงระดับน้ำอินทร์บุรี (เจาะเว็บสาขาสิงห์บุรี) ---
+# --- 2. ดึงระดับน้ำอินทร์บุรี ---
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
     water_level = None
@@ -76,7 +69,6 @@ def get_inburi_data():
                     tr = th.find_parent("tr")
                     cols = tr.find_all("td")
                     numeric_values = []
-                    
                     for td in cols:
                         text = td.get_text(strip=True)
                         try:
@@ -86,50 +78,41 @@ def get_inburi_data():
                                 numeric_values.append(float(cleaned))
                         except:
                             continue
-                            
                     if numeric_values:
                         water_level = numeric_values[0]
                         break
         except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
+            print(f"เกิดข้อผิดพลาดข้อมูลสิงห์บุรี: {e}")
         finally:
             browser.close()
             
     return water_level, bank_level
 
-# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (เจาะจากตารางกรมชลประทานโดยตรง) ---
+# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (ของใหม่ที่ถูกต้อง!) ---
 def fetch_chao_phraya_dam_discharge():
     url = f"http://water.rid.go.th/flood/flood/chao.htm?cb={random.randint(10000, 99999)}"
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     }
     try:
-        # ดึงหน้าตารางของกรมชลประทาน
         response = requests.get(url, headers=headers, timeout=30)
-        # สิ่งสำคัญ: เว็บกรมชลประทานรุ่นเก่าต้องเข้ารหัส TIS-620 เพื่อให้อ่านภาษาไทยออก
         response.encoding = 'tis-620'
-        
         soup = BeautifulSoup(response.text, "html.parser")
         
-        # ค้นหาข้อมูลในทุกแถวของตาราง
         for tr in soup.find_all("tr"):
             row_text = tr.get_text(strip=True)
-            # ค้นหาสถานี C.13 หรือคำว่า ท้ายเขื่อนเจ้าพระยา
             if "C.13" in row_text or "ท้ายเขื่อนเจ้าพระยา" in row_text:
                 cols = tr.find_all(["td", "th"])
                 numeric_values = []
-                
                 for td in cols:
                     text = td.get_text(strip=True)
-                    # คลีนตัวอักษร ตัดลูกน้ำออก เอาเฉพาะตัวเลขและจุดทศนิยม
                     cleaned = re.sub(r"[ ,]", "", text)
                     cleaned = re.sub(r"[^0-9\.]", "", cleaned)
-                    
                     if cleaned and cleaned != ".":
                         numeric_values.append(float(cleaned))
                         
-                # ในโครงสร้างตาราง C.13 ค่าปริมาณน้ำระบาย (Discharge) มักจะอยู่ช่องขวาสุดของตาราง (ตัวเลขสุดท้ายที่จับได้)
                 if numeric_values:
+                    print(f"✅ ดึงข้อมูลเขื่อนสำเร็จ: {numeric_values[-1]}")
                     return numeric_values[-1] 
                     
     except Exception as e:
@@ -145,7 +128,7 @@ if __name__ == "__main__":
     wl, bank_level = get_inburi_data()
     discharge = fetch_chao_phraya_dam_discharge()
     
-    # 2. จัดการคำความห่างตลิ่ง
+    # 2. จัดการคำ
     if wl is not None:
         dist = round(bank_level - wl, 2)
         wl_text = f"ความสูง {wl} ม.รทก. (ห่างจากตลิ่ง {dist} เมตร)"
@@ -163,28 +146,27 @@ if __name__ == "__main__":
     - อุณหภูมิ: {temp}°C, ความชื้น: {humidity}%, ลม: {wind} m/s
     - ดัชนี UV (ความแรงแดด): {uv}
     - โอกาสฝนตก: {rain_prob}%
-    - ฝุ่น PM 2.5: {pm25} μg/m³ (ข้อมูลนี้ให้ใช้ประเมินสถานการณ์เท่านั้น ห้ามพิมพ์ตัวเลขนี้ลงในโพสต์เด็ดขาด)
+    - ฝุ่น PM 2.5: {pm25} μg/m³ (ห้ามพิมพ์ตัวเลขนี้ลงในโพสต์เด็ดขาด)
     - ระดับน้ำอินทร์บุรี: {wl_text}
     - ระบายน้ำเขื่อนเจ้าพระยา: {discharge_text}
 
     กฎการเขียนโพสต์ (สำคัญมาก):
-    1. นำข้อมูลดิบมาเรียบเรียงใหม่ให้เป็นธรรมชาติ เพิ่มคำขยายความให้เห็นภาพตามความเป็นจริง เช่น:
-       - อากาศและฝน: ถ้าร้อน+ชื้นให้บอก "ร้อนอบอ้าว", มีลมบอก "ลมพัดเย็นๆ", ถ้าโอกาสฝนสูงให้เตือนพกร่มสั้นๆ
-       - เรื่องฝุ่น PM 2.5: **ห้ามระบุตัวเลขค่าฝุ่นเด็ดขาด** (เพราะเพจมีโพสต์แจ้งตัวเลขแยกต่างหากแล้ว) ให้อธิบายเป็นความรู้สึกสั้นๆ เช่น "อากาศโปร่งหายใจโล่ง" (ถ้าฝุ่นน้อย) หรือ "วันนี้ฝุ่นเริ่มเยอะ" (ถ้าฝุ่นเยอะ)
-       - UV: ถ้า UV สูง (เกิน 8) ให้เตือนสั้นๆ ว่าแดดแรงแสบผิว
-       - ระดับน้ำ: ถ้ายังห่างตลิ่งเยอะ ให้เสริมว่า "น้ำยังอยู่ในระดับต่ำ ปลอดภัย" หรือ "ยังห่างตลิ่งอีกเยอะ สบายใจได้"
-       - เขื่อนเจ้าพระยา: ถ้าระบายน้ำน้อย (เช่น ต่ำกว่า 700) ให้บอกว่า "เป็นระดับปกติ ไม่ได้มีการเร่งระบายน้ำแต่อย่างใด"
-    2. ห้ามใช้คำลงท้ายว่า "ครับ", "ค่ะ", "ครับ/ค่ะ" แบบหุ่นยนต์เด็ดขาด ให้ใช้ภาษาเล่าเรื่องแบบเป็นธรรมชาติแทน
-    3. พยายามสับเปลี่ยนคำศัพท์และรูปประโยคในแต่ละวันไม่ให้ซ้ำซากจำเจ
-    4. ให้ผลลัพธ์ออกมาตามโครงสร้างนี้เป๊ะๆ (ห้ามปรับเปลี่ยนรูปแบบหัวข้อเด็ดขาด):
+    1. นำข้อมูลดิบมาเรียบเรียงใหม่ให้เป็นธรรมชาติ เช่น:
+       - อากาศและฝน: ถ้าร้อน+ชื้นบอก "ร้อนอบอ้าว", มีลมบอก "ลมพัดเย็นๆ"
+       - เรื่องฝุ่น PM 2.5: **ห้ามระบุตัวเลขค่าฝุ่นเด็ดขาด** ให้อธิบายเป็นความรู้สึกสั้นๆ เช่น "อากาศโปร่งหายใจโล่ง" หรือ "วันนี้ฝุ่นเริ่มเยอะ" 
+       - UV: ถ้า UV สูง (เกิน 8) ให้เตือนว่าแดดแรงแสบผิว
+       - ระดับน้ำ: ถ้ายังห่างตลิ่งเยอะ ให้เสริมว่า "น้ำยังอยู่ในระดับต่ำ ปลอดภัย"
+       - เขื่อนเจ้าพระยา: ถ้าระบายน้ำน้อย ให้บอกว่า "เป็นระดับปกติ"
+    2. ห้ามใช้คำลงท้ายว่า "ครับ", "ค่ะ" แบบหุ่นยนต์เด็ดขาด ให้ใช้ภาษาเล่าเรื่องแบบธรรมชาติ
+    3. ให้ผลลัพธ์ออกมาตามโครงสร้างนี้เป๊ะๆ (ห้ามปรับเปลี่ยนรูปแบบหัวข้อเด็ดขาด):
 
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
     
-    🌡️ **สภาพอากาศ:** [สรุปอุณหภูมิ UV ฝน ลม และอธิบายเรื่องฝุ่นโดยห้ามใส่ตัวเลข แบบสั้น กระชับ เป็นธรรมชาติ]
-    🌊 **ระดับน้ำอินทร์บุรี:** [บอกตัวเลข พร้อมประโยคเสริมความอุ่นใจหรือแจ้งเตือน]
+    🌡️ **สภาพอากาศ:** [สรุปอุณหภูมิ UV ฝน ลม และอธิบายฝุ่นโดยห้ามใส่ตัวเลข แบบสั้น กระชับ]
+    🌊 **ระดับน้ำอินทร์บุรี:** [บอกตัวเลข พร้อมประโยคเสริมความอุ่นใจ]
     🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [บอกตัวเลข และวิเคราะห์ว่าเป็นระดับปกติหรือไม่]
 
-    📌 **สรุป:** [สรุปภาพรวมสั้นๆ 1-2 บรรทัด แบบเป็นกันเองให้ชาวบ้านสบายใจ]
+    📌 **สรุป:** [สรุปภาพรวมสั้นๆ 1-2 บรรทัด แบบเป็นกันเอง]
     """
     
     response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
