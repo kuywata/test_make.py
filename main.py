@@ -88,14 +88,17 @@ def get_inburi_data():
             
     return water_level, bank_level
 
-# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (ของใหม่ที่ถูกต้อง!) ---
+# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (แบบ 2 ชั้น ป้องกันเซิร์ฟเวอร์บล็อก IP ต่างประเทศ) ---
 def fetch_chao_phraya_dam_discharge():
-    url = f"http://water.rid.go.th/flood/flood/chao.htm?cb={random.randint(10000, 99999)}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
     }
+    
+    # --- แผน A: ดึงจากเว็บกรมชลประทานโดยตรง ---
+    print("▶️ กำลังพยายามดึงข้อมูลจากเว็บกรมชลประทาน...")
+    url_rid = f"http://water.rid.go.th/flood/flood/chao.htm?cb={random.randint(10000, 99999)}"
     try:
-        response = requests.get(url, headers=headers, timeout=30)
+        response = requests.get(url_rid, headers=headers, timeout=20)
         response.encoding = 'tis-620'
         soup = BeautifulSoup(response.text, "html.parser")
         
@@ -112,11 +115,34 @@ def fetch_chao_phraya_dam_discharge():
                         numeric_values.append(float(cleaned))
                         
                 if numeric_values:
-                    print(f"✅ ดึงข้อมูลเขื่อนสำเร็จ: {numeric_values[-1]}")
-                    return numeric_values[-1] 
-                    
+                    val = numeric_values[-1]
+                    print(f"✅ สำเร็จ! ได้ข้อมูลจากกรมชลประทาน: {val}")
+                    return val 
     except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการดึงข้อมูลเขื่อนเจ้าพระยาจากกรมชลประทาน: {e}")
+        print(f"⚠️ กรมชลประทาน Error หรือไม่ตอบสนอง: {e}")
+
+    # --- แผน B: ถ้าแผน A ล้มเหลว (โดนบล็อก IP) สลับมาดึงเว็บสำรอง EGA ทันที ---
+    print("🔄 กรมชลประทานบล็อกการเข้าถึง! กำลังสลับไปใช้เว็บสำรอง EGA...")
+    url_ega = f"http://tiwrm-ns1.ega.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
+    try:
+        response_ega = requests.get(url_ega, headers=headers, timeout=20)
+        response_ega.encoding = 'utf-8'
+        soup_ega = BeautifulSoup(response_ega.text, "html.parser")
+        
+        c13_box = soup_ega.find("div", id="C13")
+        if c13_box:
+            tds = c13_box.find_all("td")
+            for i, td in enumerate(tds):
+                if "ปริมาณน้ำ" in td.get_text(strip=True):
+                    val_td = tds[i+1]
+                    raw_text = val_td.get_text(strip=True).split('/')[0] 
+                    cleaned = re.sub(r"[^0-9\.]", "", raw_text)
+                    if cleaned:
+                        val = float(cleaned)
+                        print(f"✅ สำเร็จ! ดึงข้อมูลจากเว็บสำรอง EGA แทน: {val}")
+                        return val
+    except Exception as e:
+        print(f"⚠️ เว็บสำรอง EGA ก็ดึงไม่ได้: {e}")
         
     return None
 
