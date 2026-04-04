@@ -46,7 +46,7 @@ def get_weather():
         print(f"เกิดข้อผิดพลาดสภาพอากาศ: {e}")
         return "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
 
-# --- 2. ดึงระดับน้ำอินทร์บุรี (ใส่เกราะป้องกัน Error ตัวหนังสือแปลกประหลาด) ---
+# --- 2. ดึงระดับน้ำอินทร์บุรี (Playwright ตัวเก่ง) ---
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
     water_level = None
@@ -55,7 +55,6 @@ def get_inburi_data():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
-        # ปิดโหลดรูปเพื่อความเร็ว
         page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
         try:
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
@@ -66,20 +65,15 @@ def get_inburi_data():
                 if "อินทร์บุรี" in th.get_text(strip=True):
                     cols = th.find_parent("tr").find_all("td")
                     numeric_values = []
-                    
                     for td in cols:
                         text = td.get_text(strip=True)
                         try:
-                            # คลีนทุกอย่างที่ไม่ใช่ตัวเลข จุด หรือเครื่องหมายลบ
                             cleaned = re.sub(r"[ ,]", "", text)
                             cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
-                            
-                            # ถ้าเหลือแค่จุด หรือขีด หรือจุดสองอัน ห้ามแปลงเป็นเลขเด็ดขาด
                             if cleaned and cleaned not in ["-", ".", "..", "..."]:
                                 numeric_values.append(float(cleaned))
                         except ValueError:
-                            continue # ถ้าแปลงร่างเป็นเลขไม่ได้ ให้ข้ามไปหาช่องถัดไปเงียบๆ
-                            
+                            continue 
                     if numeric_values:
                         water_level = numeric_values[0]
                         print(f"✅ ได้ข้อมูลอินทร์บุรี: {water_level}")
@@ -91,54 +85,49 @@ def get_inburi_data():
             
     return water_level, bank_level
 
-# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (ดักเว็บ tiwrm แบบมี Proxy Backup ทะลุบล็อก) ---
+# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (อัปเกรดใช้ Playwright ทะลวงกำแพงเว็บ!) ---
 def fetch_chao_phraya_dam_discharge():
-    print("▶️ กำลังดึงข้อมูลเขื่อนเจ้าพระยาจากเว็บ tiwrm.hii.or.th...")
+    print("▶️ กำลังใช้เบราว์เซอร์จำลอง (Playwright) ดึงข้อมูลจาก tiwrm.hii.or.th...")
     url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
-    }
     
-    try:
-        # แผน A: ดึงตรงๆ ก่อน
-        response = requests.get(url, headers=headers, timeout=20)
-        response.encoding = 'utf-8'
-        soup = BeautifulSoup(response.text, "html.parser")
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
         
-        # ค้นหากล่อง C13
-        c13_box = soup.find("div", id="C13")
+        # ปิดโหลดรูปเพื่อความไว แต่ยอมให้โหลดสคริปต์เพื่อหลอกว่าเป็นคน
+        page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
         
-        # ถ้าหาไม่เจอ (โดนเว็บหลอกส่งหน้าขาวมาให้ เพราะบล็อก IP ต่างประเทศ)
-        if not c13_box:
-            print("⚠️ เข้าเว็บได้แต่ไม่พบตาราง C.13 (โดนบล็อก IP) กำลังบังคับสลับไปใช้ Proxy...")
-            import urllib.parse
-            # ครอบ URL ด้วย Proxy ของ AllOrigins เพื่อแปลงสัญชาติบอทให้เป็นคนทั่วไป
-            proxy_url = f"https://api.allorigins.win/get?url={urllib.parse.quote(url)}"
-            response_proxy = requests.get(proxy_url, timeout=30)
-            html = response_proxy.json().get('contents', '')
-            soup = BeautifulSoup(html, "html.parser")
-            c13_box = soup.find("div", id="C13") # ค้นหาใหม่อีกรอบ
+        try:
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
+            # บังคับรอให้กล่อง C13 โหลดขึ้นมาให้เห็นก่อน ค่อยดูดข้อมูล
+            page.wait_for_selector("#C13", timeout=30000)
             
-        if c13_box:
-            tds = c13_box.find_all("td")
-            for i, td in enumerate(tds):
-                if "ปริมาณน้ำ" in td.get_text(strip=True):
-                    val_text = tds[i+1].get_text(strip=True).split('/')[0]
-                    cleaned = re.sub(r"[^0-9\.]", "", val_text)
-                    if cleaned:
-                        val = float(cleaned)
-                        print(f"✅ สำเร็จ! ดึงข้อมูลการปล่อยน้ำได้: {val}")
-                        return val
-        else:
-            print("❌ หาตาราง C.13 ไม่เจอเลยแม้จะทะลวงด้วย Proxy แล้ว")
-                        
-    except Exception as e:
-        print(f"❌ เกิดข้อผิดพลาดในการดึงข้อมูลเขื่อน: {e}")
-        
+            html = page.content()
+            soup = BeautifulSoup(html, "html.parser")
+            
+            # เจาะเข้า ID C13
+            c13_box = soup.find("div", id="C13")
+            if c13_box:
+                tds = c13_box.find_all("td")
+                for i, td in enumerate(tds):
+                    if "ปริมาณน้ำ" in td.get_text(strip=True):
+                        # ดึงข้อมูลจากช่องถัดไป (เช่น "300.00/ 2840 cms")
+                        val_text = tds[i+1].get_text(strip=True).split('/')[0]
+                        cleaned = re.sub(r"[^0-9\.]", "", val_text)
+                        if cleaned:
+                            val = float(cleaned)
+                            print(f"✅ สำเร็จ! ดึงข้อมูลการปล่อยน้ำได้: {val}")
+                            return val
+            print("❌ เปิดเว็บได้แต่หาคำว่า ปริมาณน้ำ ไม่เจอ")
+        except Exception as e:
+            print(f"❌ เกิดข้อผิดพลาดในการใช้เบราว์เซอร์จำลองดึงเขื่อน: {e}")
+        finally:
+            browser.close()
+            
     return None
 
 if __name__ == "__main__":
-    print("=== เริ่มใช้งานตรรกะระดับเทพ (อิงข้อมูล tiwrm.hii.or.th) ===")
+    print("=== เริ่มใช้งานตรรกะระดับเทพ (Playwright Engine) ===")
     
     # 1. รวบรวมข้อมูล
     temp, pm25, rain_prob, humidity, wind, uv = get_weather()
