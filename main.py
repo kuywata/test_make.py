@@ -46,7 +46,7 @@ def get_weather():
         print(f"เกิดข้อผิดพลาดสภาพอากาศ: {e}")
         return "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
 
-# --- 2. ดึงระดับน้ำอินทร์บุรี ---
+# --- 2. ดึงระดับน้ำอินทร์บุรี (ใส่เกราะป้องกัน Error ตัวหนังสือแปลกประหลาด) ---
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
     water_level = None
@@ -55,21 +55,35 @@ def get_inburi_data():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
+        # ปิดโหลดรูปเพื่อความเร็ว
         page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font", "stylesheet"] else route.continue_())
         try:
             page.goto(url, timeout=60000, wait_until="domcontentloaded")
             page.wait_for_selector("th[scope='row']", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
+            
             for th in soup.select("th[scope='row']"):
                 if "อินทร์บุรี" in th.get_text(strip=True):
                     cols = th.find_parent("tr").find_all("td")
+                    numeric_values = []
+                    
                     for td in cols:
-                        cleaned = re.sub(r"[^0-9\.\-]", "", td.get_text(strip=True).replace(",", ""))
-                        if cleaned and cleaned != "-":
-                            water_level = float(cleaned)
-                            print(f"✅ ได้ข้อมูลอินทร์บุรี: {water_level}")
-                            break
-                    if water_level: break
+                        text = td.get_text(strip=True)
+                        try:
+                            # คลีนทุกอย่างที่ไม่ใช่ตัวเลข จุด หรือเครื่องหมายลบ
+                            cleaned = re.sub(r"[ ,]", "", text)
+                            cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
+                            
+                            # ถ้าเหลือแค่จุด หรือขีด หรือจุดสองอัน ห้ามแปลงเป็นเลขเด็ดขาด
+                            if cleaned and cleaned not in ["-", ".", "..", "..."]:
+                                numeric_values.append(float(cleaned))
+                        except ValueError:
+                            continue # ถ้าแปลงร่างเป็นเลขไม่ได้ ให้ข้ามไปหาช่องถัดไปเงียบๆ
+                            
+                    if numeric_values:
+                        water_level = numeric_values[0]
+                        print(f"✅ ได้ข้อมูลอินทร์บุรี: {water_level}")
+                        break
         except Exception as e:
             print(f"เกิดข้อผิดพลาดข้อมูลสิงห์บุรี: {e}")
         finally:
