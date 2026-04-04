@@ -97,31 +97,43 @@ def get_inburi_data():
             
     return water_level, bank_level
 
-# --- 3. ดึงเขื่อนเจ้าพระยา (ล้วงตัวแปร json_data) ---
+# --- 3. ดึงระบายน้ำเขื่อนเจ้าพระยา (เจาะจากตารางกรมชลประทานโดยตรง) ---
 def fetch_chao_phraya_dam_discharge():
-    url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
+    url = f"http://water.rid.go.th/flood/flood/chao.htm?cb={random.randint(10000, 99999)}"
     headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120.0.0.0 Safari/537.36'
     }
     try:
-        response = requests.get(url, headers=headers, timeout=20)
-        response.encoding = 'utf-8'
+        # ดึงหน้าตารางของกรมชลประทาน
+        response = requests.get(url, headers=headers, timeout=30)
+        # สิ่งสำคัญ: เว็บกรมชลประทานรุ่นเก่าต้องเข้ารหัส TIS-620 เพื่อให้อ่านภาษาไทยออก
+        response.encoding = 'tis-620'
         
-        match = re.search(r'var json_data = (\[.*\]);', response.text)
-        if match:
-            json_string = match.group(1)
-            data = json.loads(json_string)
-            water_storage = data[0]['itc_water']['C13']['storage']
-            
-            if water_storage is not None:
-                if isinstance(water_storage, (int, float)):
-                    return float(water_storage)
-                else:
-                    return float(str(water_storage).replace(',', ''))
+        soup = BeautifulSoup(response.text, "html.parser")
+        
+        # ค้นหาข้อมูลในทุกแถวของตาราง
+        for tr in soup.find_all("tr"):
+            row_text = tr.get_text(strip=True)
+            # ค้นหาสถานี C.13 หรือคำว่า ท้ายเขื่อนเจ้าพระยา
+            if "C.13" in row_text or "ท้ายเขื่อนเจ้าพระยา" in row_text:
+                cols = tr.find_all(["td", "th"])
+                numeric_values = []
+                
+                for td in cols:
+                    text = td.get_text(strip=True)
+                    # คลีนตัวอักษร ตัดลูกน้ำออก เอาเฉพาะตัวเลขและจุดทศนิยม
+                    cleaned = re.sub(r"[ ,]", "", text)
+                    cleaned = re.sub(r"[^0-9\.]", "", cleaned)
+                    
+                    if cleaned and cleaned != ".":
+                        numeric_values.append(float(cleaned))
+                        
+                # ในโครงสร้างตาราง C.13 ค่าปริมาณน้ำระบาย (Discharge) มักจะอยู่ช่องขวาสุดของตาราง (ตัวเลขสุดท้ายที่จับได้)
+                if numeric_values:
+                    return numeric_values[-1] 
+                    
     except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการดึงข้อมูลเขื่อน HII: {e}")
+        print(f"เกิดข้อผิดพลาดในการดึงข้อมูลเขื่อนเจ้าพระยาจากกรมชลประทาน: {e}")
         
     return None
 
