@@ -23,38 +23,52 @@ time_str = now.strftime("%H:%M น.")
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
     
-    # URL 1: ดึงฝน ลม ความชื้น (Tomorrow.io)
-    tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-    # URL 2: ดึงอุณหภูมิ และ UV (Open-Meteo Weather API)
-    om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
-    # URL 3: ดึงฝุ่น PM 2.5 โดยเฉพาะ (Open-Meteo Air Quality API)
-    om_aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
-    
+    # กำหนดค่าเริ่มต้นเป็น N/A ไว้ก่อน ถ้าตัวไหนรอดก็จะได้ค่าจริงไปทับ
+    temp, pm25, rain_prob, humidity, wind, uv = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
+
+    # --- กล่องที่ 1: ดึงฝน ลม ความชื้น (Tomorrow.io) ---
     try:
-        # 1.1 ดึงข้อมูลฝนเฉพาะจุด ลม และความชื้น (Tomorrow.io)
-        tmr_res = requests.get(tmr_url).json()
-        current_data = tmr_res['timelines']['minutely'][0]['values']
-        
-        humidity = round(current_data['humidity'], 1)
-        wind = round(current_data['windSpeed'], 1) 
-        
-        hourly_data = tmr_res['timelines']['hourly'][:12]
-        rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
-        rain_prob = max(rain_probs)
-
-        # 1.2 ดึงอุณหภูมิ และ UV (Open-Meteo Weather)
-        w_res = requests.get(om_weather_url).json()
-        temp = w_res['current']['temperature_2m']
-        uv = w_res['current'].get('uv_index', 'N/A')
-
-        # 1.3 ดึงฝุ่น PM 2.5 (Open-Meteo AQI)
-        aqi_res = requests.get(om_aqi_url).json()
-        pm25 = aqi_res['current'].get('pm2_5', 'N/A')
-
-        return temp, pm25, rain_prob, humidity, wind, uv
+        tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
+        res = requests.get(tmr_url, timeout=10)
+        if res.status_code == 200:
+            tmr_res = res.json()
+            current_data = tmr_res['timelines']['minutely'][0]['values']
+            humidity = round(current_data['humidity'], 1)
+            wind = round(current_data['windSpeed'], 1) 
+            hourly_data = tmr_res['timelines']['hourly'][:12]
+            rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
+            rain_prob = max(rain_probs)
+        else:
+            print(f"❌ Tomorrow.io Error: ได้รับ HTTP {res.status_code} - {res.text[:100]}")
     except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการดึงสภาพอากาศแบบลูกผสม: {e}")
-        return "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
+        print(f"❌ Error พังที่ Tomorrow.io: {e}")
+
+    # --- กล่องที่ 2: ดึงอุณหภูมิ และ UV (Open-Meteo) ---
+    try:
+        om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
+        res = requests.get(om_weather_url, timeout=10)
+        if res.status_code == 200:
+            w_res = res.json()
+            temp = w_res['current']['temperature_2m']
+            uv = w_res['current'].get('uv_index', 'N/A')
+        else:
+            print(f"❌ Open-Meteo (อากาศ) Error: ได้รับ HTTP {res.status_code} - {res.text[:100]}")
+    except Exception as e:
+        print(f"❌ Error พังที่ Open-Meteo (อากาศ): {e}")
+
+    # --- กล่องที่ 3: ดึงฝุ่น PM 2.5 (Open-Meteo) ---
+    try:
+        om_aqi_url = "https://air-quality-api.open-meteo.com/v1/air-quality?latitude=14.9961&longitude=100.3253&current=pm2_5&timezone=Asia%2FBangkok"
+        res = requests.get(om_aqi_url, timeout=10)
+        if res.status_code == 200:
+            aqi_res = res.json()
+            pm25 = aqi_res['current'].get('pm2_5', 'N/A')
+        else:
+            print(f"❌ Open-Meteo (ฝุ่น) Error: ได้รับ HTTP {res.status_code} - {res.text[:100]}")
+    except Exception as e:
+        print(f"❌ Error พังที่ Open-Meteo (ฝุ่น): {e}")
+
+    return temp, pm25, rain_prob, humidity, wind, uv
 
 # --- 2. ดึงระดับน้ำอินทร์บุรี (เจาะเว็บสาขาสิงห์บุรี) ---
 def get_inburi_data():
