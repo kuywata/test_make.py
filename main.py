@@ -11,7 +11,7 @@ from google import genai
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# ปิด Warning SSL สำหรับเว็บหน่วยงานรัฐ (GISTDA/Air4Thai)
+# ปิด Warning SSL สำหรับเว็บหน่วยงานรัฐ
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
@@ -22,7 +22,12 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
-date_str = now.strftime("%d %B 2569")
+
+# ✅ แก้ไข: แปลงเดือนเป็นภาษาไทยและคำนวณปี พ.ศ. แบบอัตโนมัติ
+THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+thai_month = THAI_MONTHS[now.month - 1]
+thai_year = now.year + 543
+date_str = f"{now.day} {thai_month} {thai_year}"
 time_str = now.strftime("%H:%M น.")
 
 # ==========================================
@@ -42,13 +47,12 @@ def get_dist(lat1, lon1, lat2, lon2):
 def get_accurate_pm25():
     INBURI_LAT = 15.0076
     INBURI_LON = 100.3273
-    MAX_DATA_AGE_SECONDS = 10800 # ข้อมูลต้องไม่เก่าเกิน 3 ชั่วโมง
-    MAX_DISTANCE_KM = 50         # รัศมีไม่เกิน 50 กม.
+    MAX_DATA_AGE_SECONDS = 10800 
+    MAX_DISTANCE_KM = 50         
     
     headers = {'User-Agent': 'Mozilla/5.0'}
     all_sources = [] 
     
-    # 1. ลองดึงจาก GISTDA (Priority 0)
     try:
         current_ts = int(time.time())
         url_gistda = f"https://pm25.gistda.or.th/rest/getPM25byLocation?lat={INBURI_LAT}&lng={INBURI_LON}&t={current_ts}"
@@ -74,7 +78,6 @@ def get_accurate_pm25():
                      all_sources.append({'pm25': val, 'distance': 0, 'age': data_age, 'priority': 0})
     except: pass
 
-    # 2. ลองดึงจาก Air4Thai (Priority 1)
     try:
         res = requests.get(f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}", headers=headers, timeout=15, verify=False)
         if res.status_code == 200:
@@ -92,7 +95,6 @@ def get_accurate_pm25():
                 except: continue
     except: pass
 
-    # 3. สำรองด้วย OpenMeteo (Priority 3)
     try:
         url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={INBURI_LAT}&longitude={INBURI_LON}&current=pm2_5&timezone=Asia%2FBangkok"
         res = requests.get(url, headers=headers, timeout=10)
@@ -100,11 +102,9 @@ def get_accurate_pm25():
             all_sources.append({'pm25': float(res.json()['current']['pm2_5']), 'distance': 0, 'age': 0, 'priority': 3})
     except: pass
 
-    # ประมวลผลหาตัวที่ดีที่สุด
     if not all_sources: 
         return "N/A"
     
-    # เรียงลำดับตาม Priority > Distance > Age
     all_sources.sort(key=lambda x: (x['priority'], x['distance'], x['age']))
     best_pm25 = all_sources[0]['pm25']
     return f"{best_pm25:.1f}"
@@ -116,18 +116,19 @@ def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
     temp, pm25, rain_prob, humidity, wind, uv = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
 
-    try:
-        tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-        res = requests.get(tmr_url, timeout=10)
-        if res.status_code == 200:
-            tmr_res = res.json()
-            current_data = tmr_res['timelines']['minutely'][0]['values']
-            humidity = round(current_data['humidity'], 1)
-            wind = round(current_data['windSpeed'], 1) 
-            hourly_data = tmr_res['timelines']['hourly'][:12]
-            rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
-            rain_prob = max(rain_probs)
-    except: pass
+    if TOMORROW_API_KEY:
+        try:
+            tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
+            res = requests.get(tmr_url, timeout=10)
+            if res.status_code == 200:
+                tmr_res = res.json()
+                current_data = tmr_res['timelines']['minutely'][0]['values']
+                humidity = round(current_data['humidity'], 1)
+                wind = round(current_data['windSpeed'], 1) 
+                hourly_data = tmr_res['timelines']['hourly'][:12]
+                rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
+                rain_prob = max(rain_probs)
+        except: pass
 
     try:
         om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
@@ -138,9 +139,6 @@ def get_weather():
             uv = w_res['current'].get('uv_index', 'N/A')
     except: pass
 
-    # ปิดการดึงฝุ่นจากกล่องเดิมทิ้ง เพื่อประหยัด API และไม่ให้ตีกัน
-    # ค่า pm25 ที่ Return ออกไปจะเป็น "N/A" และจะถูกเขียนทับด้วยฟังก์ชันใหม่ใน Main แทน
-    
     return temp, pm25, rain_prob, humidity, wind, uv
 
 def get_inburi_data():
@@ -203,19 +201,13 @@ def fetch_chao_phraya_dam_discharge():
     return None
 
 if __name__ == "__main__":
-    print("=== เริ่มใช้ตรรกะเจาะข้อมูลระดับเทพ ===")
+    print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี ===")
     
-    # 1. รวบรวมข้อมูล
-    # ใช้ _ เพื่อทิ้งค่า pm25 แบบเดิมที่ไม่ได้ใช้แล้ว
     temp, _, rain_prob, humidity, wind, uv = get_weather() 
-    
-    # ใช้ฟังก์ชันฝุ่นตัวใหม่ที่แม่นยำกว่าแทน
     pm25 = get_accurate_pm25()
-    
     wl, bank_level = get_inburi_data()
     discharge = fetch_chao_phraya_dam_discharge()
     
-    # 2. จัดการคำความห่างตลิ่ง
     if wl is not None:
         dist = round(bank_level - wl, 2)
         wl_text = f"ความสูง {wl} ม.รทก. (ห่างจากตลิ่ง {dist} เมตร)"
@@ -224,7 +216,6 @@ if __name__ == "__main__":
         
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
 
-    # 3. เตรียมโพสต์
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" ที่คอยอัปเดตข่าวสารให้ชาวบ้านอินทร์บุรีแบบเป็นกันเอง ภาษาอ่านง่าย ไม่เป็นทางการเกินไป และไม่จำเจ
     
@@ -240,7 +231,7 @@ if __name__ == "__main__":
     กฎการเขียนโพสต์ (สำคัญมาก):
     1. นำข้อมูลดิบมาเรียบเรียงใหม่ให้เป็นธรรมชาติ เพิ่มคำขยายความให้เห็นภาพตามความเป็นจริง เช่น:
        - อากาศและฝน: ถ้าร้อน+ชื้นให้บอก "ร้อนอบอ้าว", มีลมบอก "ลมพัดเย็นๆ", ถ้าโอกาสฝนสูงให้เตือนพกร่มสั้นๆ
-       - เรื่องฝุ่น PM 2.5: **ห้ามระบุตัวเลขค่าฝุ่นเด็ดขาด** (เพราะเพจมีโพสต์แจ้งตัวเลขแยกต่างหากแล้ว) ให้อธิบายเป็นความรู้สึกสั้นๆ เช่น "อากาศโปร่งหายใจโล่ง" (ถ้าฝุ่นน้อย) หรือ "วันนี้ฝุ่นเริ่มเยอะ" (ถ้าฝุ่นเยอะ)
+       - เรื่องฝุ่น PM 2.5: **ห้ามระบุตัวเลขค่าฝุ่นเด็ดขาด** ให้อธิบายเป็นความรู้สึกสั้นๆ เช่น "อากาศโปร่งหายใจโล่ง" หรือ "วันนี้ฝุ่นเริ่มเยอะ"
        - UV: ถ้า UV สูง (เกิน 8) ให้เตือนสั้นๆ ว่าแดดแรงแสบผิว
        - ระดับน้ำ: ถ้ายังห่างตลิ่งเยอะ ให้เสริมว่า "น้ำยังอยู่ในระดับต่ำ ปลอดภัย" หรือ "ยังห่างตลิ่งอีกเยอะ สบายใจได้"
        - เขื่อนเจ้าพระยา: ถ้าระบายน้ำน้อย (เช่น ต่ำกว่า 700) ให้บอกว่า "เป็นระดับปกติ ไม่ได้มีการเร่งระบายน้ำแต่อย่างใด"
@@ -257,13 +248,27 @@ if __name__ == "__main__":
     📌 **สรุป:** [สรุปภาพรวมสั้นๆ 1-2 บรรทัด แบบเป็นกันเองให้ชาวบ้านสบายใจ]
     """
     
-    response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-    final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย"
-    
+    # ✅ เพิ่มระบบ Retry ป้องกัน Gemini ล่มชั่วคราว
+    max_retries = 3
+    final_post = ""
+    for attempt in range(max_retries):
+        try:
+            print(f"กำลังร่างโพสต์ด้วย AI (รอบที่ {attempt+1})...")
+            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย"
+            break # ถ้าสำเร็จให้ออกจาลูป
+        except Exception as e:
+            if attempt < max_retries - 1:
+                print(f"⚠️ Gemini API ไม่ว่าง: {e} -> รอ 5 วินาที...")
+                time.sleep(5)
+            else:
+                print(f"❌ Gemini API ล้มเหลวทั้งหมด: {e}")
+                # แผนสำรองถ้า AI ล่มจริงๆ ให้โพสต์ข้อมูลดิบไปก่อน เพจจะได้ไม่อัปเดตขาดตอน
+                final_post = f"**สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})\n\n(วันนี้ระบบ AI สรุปข้อมูลมีปัญหาชั่วคราว แอดมินขอแจ้งข้อมูลดิบไปก่อนนะ)\n🌡️ อุณหภูมิ: {temp}°C | โอกาสฝน: {rain_prob}%\n🌊 ระดับน้ำ: {wl_text}\n🛑 ระบายน้ำ: {discharge_text}\n\n#อินทร์บุรีรอดมั้ย"
+
     print("\nข้อความที่จะโพสต์:\n", final_post)
     
-    # 4. ส่งเข้า Make.com
-    if MAKE_WEBHOOK_URL:
+    if MAKE_WEBHOOK_URL and final_post:
         res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post})
         if res.status_code == 200:
             print("\n✅ ส่ง Webhook ไปยังหน้าเพจสำเร็จแล้ว!")
