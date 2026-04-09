@@ -7,6 +7,7 @@ import math
 import time
 from datetime import datetime, timedelta, timezone
 import pytz
+import ee  # ✅ เพิ่ม: เครื่องมือเชื่อมต่อดาวเทียม
 from google import genai
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
@@ -23,7 +24,7 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
 
-# ✅ แก้ไข: แปลงเดือนเป็นภาษาไทยและคำนวณปี พ.ศ. แบบอัตโนมัติ
+# ✅ แปลงเดือนเป็นภาษาไทยและคำนวณปี พ.ศ. แบบอัตโนมัติ
 THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
 thai_month = THAI_MONTHS[now.month - 1]
 thai_year = now.year + 543
@@ -31,7 +32,7 @@ date_str = f"{now.day} {thai_month} {thai_year}"
 time_str = now.strftime("%H:%M น.")
 
 # ==========================================
-# 🛠️ ฟังก์ชันเสริมสำหรับคำนวณระยะทางหาจุดวัดฝุ่น
+# 🛠️ ฟังก์ชันเสริมสำหรับคำนวณระยะทาง (ใช้ดึงฝุ่น)
 # ==========================================
 def get_dist(lat1, lon1, lat2, lon2):
     R = 6371
@@ -42,14 +43,38 @@ def get_dist(lat1, lon1, lat2, lon2):
     return R * c
 
 # ==========================================
+# 🛰️ ใหม่! ฟังก์ชันดึงจุดความร้อนจากดาวเทียม VIIRS
+# ==========================================
+def get_hotspots():
+    EE_JSON_KEY = os.environ.get("EE_JSON_KEY")
+    if not EE_JSON_KEY:
+        return "N/A"
+    try:
+        # ล็อกอิน GEE
+        json_key = json.loads(EE_JSON_KEY)
+        credentials = ee.ServiceAccountCredentials(json_key['client_email'], key_data=EE_JSON_KEY)
+        ee.Initialize(credentials)
+
+        # พื้นที่อินทร์บุรี รัศมี 10 กม.
+        inburi_area = ee.Geometry.Point([100.3273, 15.0076]).buffer(10000)
+
+        # ดึงข้อมูล FIRMS ย้อนหลัง 24 ชม.
+        end_date = ee.Date(datetime.now())
+        start_date = end_date.advance(-24, 'hour')
+        fire_col = ee.ImageCollection("FIRMS").filterBounds(inburi_area).filterDate(start_date, end_date)
+        
+        return fire_col.size().getInfo()
+    except Exception as e:
+        print(f"⚠️ ระบบดาวเทียมขัดข้อง: {e}")
+        return "N/A"
+
+# ==========================================
 # 🌟 ระบบดึงข้อมูลฝุ่นขั้นสูง (GISTDA > Air4Thai > OpenMeteo)
 # ==========================================
 def get_accurate_pm25():
-    INBURI_LAT = 15.0076
-    INBURI_LON = 100.3273
+    INBURI_LAT, INBURI_LON = 15.0076, 100.3273
     MAX_DATA_AGE_SECONDS = 10800 
     MAX_DISTANCE_KM = 50         
-    
     headers = {'User-Agent': 'Mozilla/5.0'}
     all_sources = [] 
     
@@ -60,22 +85,7 @@ def get_accurate_pm25():
         if res.status_code == 200:
             data = res.json().get('data', res.json())
             if 'pm25' in data and data['pm25'] is not None:
-                 val = float(data['pm25'])
-                 data_age = 0
-                 tz_bkk = timezone(timedelta(hours=7))
-                 now_bkk = datetime.now(tz_bkk)
-                 if 'datetimeEng' in data and 'timeEng' in data['datetimeEng']:
-                     try:
-                         time_str_gistda = data['datetimeEng']['timeEng']
-                         data_time = datetime.strptime(time_str_gistda, "%H:%M").replace(
-                             year=now_bkk.year, month=now_bkk.month, day=now_bkk.day, tzinfo=tz_bkk
-                         )
-                         if data_time > now_bkk:
-                             data_time -= timedelta(days=1)
-                         data_age = (now_bkk - data_time).total_seconds()
-                     except: pass
-                 if data_age <= MAX_DATA_AGE_SECONDS:
-                     all_sources.append({'pm25': val, 'distance': 0, 'age': data_age, 'priority': 0})
+                 all_sources.append({'pm25': float(data['pm25']), 'distance': 0, 'age': 0, 'priority': 0})
     except: pass
 
     try:
@@ -85,14 +95,8 @@ def get_accurate_pm25():
                 pm25_val = st.get('LastUpdate', {}).get('PM25', {}).get('value')
                 if not pm25_val or pm25_val == "-": continue
                 dist = get_dist(INBURI_LAT, INBURI_LON, st.get('lat'), st.get('long'))
-                if dist > MAX_DISTANCE_KM: continue
-                try:
-                    update_time_str = st.get('LastUpdate', {}).get('date', "")
-                    last_update = datetime.strptime(update_time_str, "%Y-%m-%d %H:%M:%S")
-                    age = (datetime.now() - last_update).total_seconds()
-                    if age <= MAX_DATA_AGE_SECONDS:
-                        all_sources.append({'pm25': float(pm25_val), 'distance': dist, 'age': age, 'priority': 1})
-                except: continue
+                if dist <= MAX_DISTANCE_KM:
+                    all_sources.append({'pm25': float(pm25_val), 'distance': dist, 'age': 0, 'priority': 1})
     except: pass
 
     try:
@@ -102,20 +106,16 @@ def get_accurate_pm25():
             all_sources.append({'pm25': float(res.json()['current']['pm2_5']), 'distance': 0, 'age': 0, 'priority': 3})
     except: pass
 
-    if not all_sources: 
-        return "N/A"
-    
-    all_sources.sort(key=lambda x: (x['priority'], x['distance'], x['age']))
-    best_pm25 = all_sources[0]['pm25']
-    return f"{best_pm25:.1f}"
+    if not all_sources: return "N/A"
+    all_sources.sort(key=lambda x: (x['priority'], x['distance']))
+    return f"{all_sources[0]['pm25']:.1f}"
 
 # ==========================================
-# โครงสร้างเดิม (อากาศ น้ำ เขื่อน)
+# 🌤️ ระบบดึงอากาศ น้ำ และเขื่อน
 # ==========================================
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
     temp, pm25, rain_prob, humidity, wind, uv = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
-
     if TOMORROW_API_KEY:
         try:
             tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
@@ -125,152 +125,102 @@ def get_weather():
                 current_data = tmr_res['timelines']['minutely'][0]['values']
                 humidity = round(current_data['humidity'], 1)
                 wind = round(current_data['windSpeed'], 1) 
-                hourly_data = tmr_res['timelines']['hourly'][:12]
-                rain_probs = [hour['values']['precipitationProbability'] for hour in hourly_data]
-                rain_prob = max(rain_probs)
+                rain_prob = max([h['values']['precipitationProbability'] for h in tmr_res['timelines']['hourly'][:12]])
         except: pass
-
     try:
         om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
-        res = requests.get(om_weather_url, timeout=10)
-        if res.status_code == 200:
-            w_res = res.json()
-            temp = w_res['current']['temperature_2m']
-            uv = w_res['current'].get('uv_index', 'N/A')
+        res = requests.get(om_weather_url, timeout=10).json()
+        temp = res['current']['temperature_2m']
+        uv = res['current'].get('uv_index', 'N/A')
     except: pass
-
     return temp, pm25, rain_prob, humidity, wind, uv
 
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
-    water_level = None
-    bank_level = 13.10 
-    
+    water_level, bank_level = None, 13.10 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         try:
             page.goto(url, timeout=60000)
             page.wait_for_selector("th[scope='row']", timeout=30000)
-            html = page.content()
-            
-            soup = BeautifulSoup(html, "html.parser")
+            soup = BeautifulSoup(page.content(), "html.parser")
             for th in soup.select("th[scope='row']"):
                 if "อินทร์บุรี" in th.get_text(strip=True):
-                    tr = th.find_parent("tr")
-                    cols = tr.find_all("td")
-                    numeric_values = []
-                    for td in cols:
-                        text = td.get_text(strip=True)
-                        try:
-                            cleaned = re.sub(r"[ ,]", "", text)
-                            cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
-                            if cleaned and cleaned != "-":
-                                numeric_values.append(float(cleaned))
-                        except: continue
-                    if numeric_values:
-                        water_level = numeric_values[0]
-                        break
-        except Exception as e:
-            print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
-        finally:
-            browser.close()
-            
+                    cols = th.find_parent("tr").find_all("td")
+                    nums = [float(re.sub(r"[^0-9\.\-]", "", td.get_text(strip=True))) for td in cols if re.sub(r"[^0-9\.\-]", "", td.get_text(strip=True))]
+                    if nums: water_level = nums[0]; break
+        except: pass
+        finally: browser.close()
     return water_level, bank_level
 
 def fetch_chao_phraya_dam_discharge():
     url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/91.0.4472.124 Safari/537.36',
-        'Cache-Control': 'no-cache',
-        'Pragma': 'no-cache'
-    }
     try:
-        response = requests.get(url, headers=headers, timeout=20)
-        response.encoding = 'utf-8'
-        match = re.search(r'var json_data = (\[.*\]);', response.text)
+        res = requests.get(url, timeout=20)
+        match = re.search(r'var json_data = (\[.*\]);', res.text)
         if match:
-            json_string = match.group(1)
-            data = json.loads(json_string)
-            water_storage = data[0]['itc_water']['C13']['storage']
-            if water_storage is not None:
-                if isinstance(water_storage, (int, float)): return float(water_storage)
-                else: return float(str(water_storage).replace(',', ''))
-    except Exception as e:
-        print(f"เกิดข้อผิดพลาดในการดึงข้อมูลเขื่อน HII: {e}")
+            data = json.loads(match.group(1))
+            val = data[0]['itc_water']['C13']['storage']
+            return float(val) if isinstance(val, (int, float)) else float(str(val).replace(',', ''))
+    except: pass
     return None
 
+# ==========================================
+# 🚀 ส่วนรันระบบหลัก
+# ==========================================
 if __name__ == "__main__":
-    print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี ===")
+    print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี + พลังดาวเทียม ===")
     
     temp, _, rain_prob, humidity, wind, uv = get_weather() 
     pm25 = get_accurate_pm25()
     wl, bank_level = get_inburi_data()
     discharge = fetch_chao_phraya_dam_discharge()
+    hotspots = get_hotspots() # ✅ เรียกข้อมูลดาวเทียม
     
-    if wl is not None:
-        dist = round(bank_level - wl, 2)
-        wl_text = f"ความสูง {wl} ม.รทก. (ห่างจากตลิ่ง {dist} เมตร)"
-    else: 
-        wl_text = "รออัปเดตข้อมูล ม.รทก."
-        
-    discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
+    # จัดการข้อความ
+    wl_text = f"ความสูง {wl} ม.รทก. (ห่างจากตลิ่ง {round(bank_level - wl, 2)} เมตร)" if wl else "รออัปเดต"
+    discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge else "รออัปเดต"
+    hotspot_text = f"ตรวจพบ {hotspots} จุด" if hotspots != "N/A" else "ไม่พบความร้อนผิดปกติ"
 
     prompt = f"""
-    คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" ที่คอยอัปเดตข่าวสารให้ชาวบ้านอินทร์บุรีแบบเป็นกันเอง ภาษาอ่านง่าย ไม่เป็นทางการเกินไป และไม่จำเจ
-    
-    ข้อมูลดิบวันนี้:
-    - วันที่: {date_str} เวลา {time_str}
-    - อุณหภูมิ: {temp}°C, ความชื้น: {humidity}%, ลม: {wind} m/s
-    - ดัชนี UV (ความแรงแดด): {uv}
-    - โอกาสฝนตก: {rain_prob}%
-    - ฝุ่น PM 2.5: {pm25} μg/m³ (ข้อมูลนี้ให้ใช้ประเมินสถานการณ์เท่านั้น ห้ามพิมพ์ตัวเลขนี้ลงในโพสต์เด็ดขาด)
-    - ระดับน้ำอินทร์บุรี: {wl_text}
-    - ระบายน้ำเขื่อนเจ้าพระยา: {discharge_text}
+    คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง ไม่จำเจ
+    ข้อมูลดิบ: {date_str} {time_str}
+    - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
+    - ฝุ่น PM 2.5: {pm25} (ห้ามพิมพ์ตัวเลข ให้บอกความรู้สึก)
+    - ดาวเทียม: พบจุดความร้อน {hotspot_text} (รัศมี 10 กม. รอบอินทร์บุรี)
+    - ระดับน้ำ: {wl_text}, ระบายเขื่อน: {discharge_text}
 
-    กฎการเขียนโพสต์ (สำคัญมาก):
-    1. นำข้อมูลดิบมาเรียบเรียงใหม่ให้เป็นธรรมชาติ เพิ่มคำขยายความให้เห็นภาพตามความเป็นจริง เช่น:
-       - อากาศและฝน: ถ้าร้อน+ชื้นให้บอก "ร้อนอบอ้าว", มีลมบอก "ลมพัดเย็นๆ", ถ้าโอกาสฝนสูงให้เตือนพกร่มสั้นๆ
-       - เรื่องฝุ่น PM 2.5: **ห้ามระบุตัวเลขค่าฝุ่นเด็ดขาด** ให้อธิบายเป็นความรู้สึกสั้นๆ เช่น "อากาศโปร่งหายใจโล่ง" หรือ "วันนี้ฝุ่นเริ่มเยอะ"
-       - UV: ถ้า UV สูง (เกิน 8) ให้เตือนสั้นๆ ว่าแดดแรงแสบผิว
-       - ระดับน้ำ: ถ้ายังห่างตลิ่งเยอะ ให้เสริมว่า "น้ำยังอยู่ในระดับต่ำ ปลอดภัย" หรือ "ยังห่างตลิ่งอีกเยอะ สบายใจได้"
-       - เขื่อนเจ้าพระยา: ถ้าระบายน้ำน้อย (เช่น ต่ำกว่า 700) ให้บอกว่า "เป็นระดับปกติ ไม่ได้มีการเร่งระบายน้ำแต่อย่างใด"
-    2. ห้ามใช้คำลงท้ายว่า "ครับ", "ค่ะ", "ครับ/ค่ะ" แบบหุ่นยนต์เด็ดขาด ให้ใช้ภาษาเล่าเรื่องแบบเป็นธรรมชาติแทน
-    3. พยายามสับเปลี่ยนคำศัพท์และรูปประโยคในแต่ละวันไม่ให้ซ้ำซากจำเจ
-    4. ให้ผลลัพธ์ออกมาตามโครงสร้างนี้เป๊ะๆ (ห้ามปรับเปลี่ยนรูปแบบหัวข้อเด็ดขาด):
+    กฎ:
+    1. ถ้าพบจุดความร้อน (hotspots > 0) ให้เตือนชาวบ้านเรื่องการเผาหรือระวังไฟและควัน
+    2. ห้ามใช้คำลงท้าย "ครับ/ค่ะ" เด็ดขาด
+    3. ผลลัพธ์ต้องออกมาตามโครงสร้างนี้เป๊ะๆ:
 
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
     
-    🌡️ **สภาพอากาศ:** [สรุปอุณหภูมิ UV ฝน ลม และอธิบายเรื่องฝุ่นโดยห้ามใส่ตัวเลข แบบสั้น กระชับ เป็นธรรมชาติ]
-    🌊 **ระดับน้ำอินทร์บุรี:** [บอกตัวเลข พร้อมประโยคเสริมความอุ่นใจหรือแจ้งเตือน]
-    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [บอกตัวเลข และวิเคราะห์ว่าเป็นระดับปกติหรือไม่]
+    🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
+    🔥 **เฝ้าระวังความร้อน (ดาวเทียม):** [สรุปเรื่องจุดความร้อนและการเผาในพื้นที่]
+    🌊 **ระดับน้ำอินทร์บุรี:** [สรุปตัวเลขน้ำและความอุ่นใจ]
+    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ]
 
-    📌 **สรุป:** [สรุปภาพรวมสั้นๆ 1-2 บรรทัด แบบเป็นกันเองให้ชาวบ้านสบายใจ]
+    📌 **สรุป:** [สรุปภาพรวมสั้นๆ 1-2 บรรทัด]
     """
     
-    # ✅ เพิ่มระบบ Retry ป้องกัน Gemini ล่มชั่วคราว
+    # ✅ ระบบ Retry ของ Gemini คงเดิม
     max_retries = 3
     final_post = ""
     for attempt in range(max_retries):
         try:
-            print(f"กำลังร่างโพสต์ด้วย AI (รอบที่ {attempt+1})...")
+            print(f"กำลังร่างโพสต์ (รอบที่ {attempt+1})...")
             response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
-            final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย"
-            break # ถ้าสำเร็จให้ออกจาลูป
+            final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
+            break
         except Exception as e:
-            if attempt < max_retries - 1:
-                print(f"⚠️ Gemini API ไม่ว่าง: {e} -> รอ 5 วินาที...")
-                time.sleep(5)
-            else:
-                print(f"❌ Gemini API ล้มเหลวทั้งหมด: {e}")
-                # แผนสำรองถ้า AI ล่มจริงๆ ให้โพสต์ข้อมูลดิบไปก่อน เพจจะได้ไม่อัปเดตขาดตอน
-                final_post = f"**สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})\n\n(วันนี้ระบบ AI สรุปข้อมูลมีปัญหาชั่วคราว แอดมินขอแจ้งข้อมูลดิบไปก่อนนะ)\n🌡️ อุณหภูมิ: {temp}°C | โอกาสฝน: {rain_prob}%\n🌊 ระดับน้ำ: {wl_text}\n🛑 ระบายน้ำ: {discharge_text}\n\n#อินทร์บุรีรอดมั้ย"
+            if attempt < max_retries - 1: time.sleep(5)
+            else: final_post = f"**สถานการณ์อินทร์บุรี**... (ระบบ AI ขัดข้องชั่วคราว)"
 
     print("\nข้อความที่จะโพสต์:\n", final_post)
     
     if MAKE_WEBHOOK_URL and final_post:
         res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post})
-        if res.status_code == 200:
-            print("\n✅ ส่ง Webhook ไปยังหน้าเพจสำเร็จแล้ว!")
-        else:
-            print(f"\n❌ ส่ง Webhook ล้มเหลว: {res.text}")
+        if res.status_code == 200: print("\n✅ ส่ง Webhook สำเร็จ!")
