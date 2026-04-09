@@ -7,33 +7,26 @@ import math
 import time
 from datetime import datetime, timedelta, timezone
 import pytz
-import ee  # ✅ เพิ่ม: เครื่องมือเชื่อมต่อดาวเทียม
+import ee
 from google import genai
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-# ปิด Warning SSL สำหรับเว็บหน่วยงานรัฐ
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-# --- ตั้งค่าพื้นฐาน ---
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
-
-# ✅ แปลงเดือนเป็นภาษาไทยและคำนวณปี พ.ศ. แบบอัตโนมัติ
 THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
 thai_month = THAI_MONTHS[now.month - 1]
 thai_year = now.year + 543
 date_str = f"{now.day} {thai_month} {thai_year}"
 time_str = now.strftime("%H:%M น.")
 
-# ==========================================
-# 🛠️ ฟังก์ชันเสริมสำหรับคำนวณระยะทาง (ใช้ดึงฝุ่น)
-# ==========================================
 def get_dist(lat1, lon1, lat2, lon2):
     R = 6371
     dlat = math.radians(float(lat2) - float(lat1))
@@ -42,23 +35,16 @@ def get_dist(lat1, lon1, lat2, lon2):
     c = 2 * math.asin(math.sqrt(a))
     return R * c
 
-# ==========================================
-# 🛰️ ใหม่! ฟังก์ชันดึงจุดความร้อนจากดาวเทียม VIIRS
-# ==========================================
 def get_hotspots():
     EE_JSON_KEY = os.environ.get("EE_JSON_KEY")
     if not EE_JSON_KEY:
         return "N/A"
     try:
-        # ล็อกอิน GEE
         json_key = json.loads(EE_JSON_KEY)
         credentials = ee.ServiceAccountCredentials(json_key['client_email'], key_data=EE_JSON_KEY)
         ee.Initialize(credentials)
 
-        # พื้นที่อินทร์บุรี รัศมี 10 กม.
         inburi_area = ee.Geometry.Point([100.3273, 15.0076]).buffer(10000)
-
-        # ดึงข้อมูล FIRMS ย้อนหลัง 24 ชม.
         end_date = ee.Date(datetime.now())
         start_date = end_date.advance(-24, 'hour')
         fire_col = ee.ImageCollection("FIRMS").filterBounds(inburi_area).filterDate(start_date, end_date)
@@ -68,9 +54,6 @@ def get_hotspots():
         print(f"⚠️ ระบบดาวเทียมขัดข้อง: {e}")
         return "N/A"
 
-# ==========================================
-# 🌟 ระบบดึงข้อมูลฝุ่นขั้นสูง (GISTDA > Air4Thai > OpenMeteo)
-# ==========================================
 def get_accurate_pm25():
     INBURI_LAT, INBURI_LON = 15.0076, 100.3273
     MAX_DATA_AGE_SECONDS = 10800 
@@ -110,9 +93,6 @@ def get_accurate_pm25():
     all_sources.sort(key=lambda x: (x['priority'], x['distance']))
     return f"{all_sources[0]['pm25']:.1f}"
 
-# ==========================================
-# 🌤️ ระบบดึงอากาศ น้ำ และเขื่อน
-# ==========================================
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
     temp, pm25, rain_prob, humidity, wind, uv = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
@@ -166,9 +146,6 @@ def fetch_chao_phraya_dam_discharge():
     except: pass
     return None
 
-# ==========================================
-# 🚀 ส่วนรันระบบหลัก
-# ==========================================
 if __name__ == "__main__":
     print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี + พลังดาวเทียม ===")
     
@@ -176,37 +153,42 @@ if __name__ == "__main__":
     pm25 = get_accurate_pm25()
     wl, bank_level = get_inburi_data()
     discharge = fetch_chao_phraya_dam_discharge()
-    hotspots = get_hotspots() # ✅ เรียกข้อมูลดาวเทียม
+    hotspots = get_hotspots()
     
-    # จัดการข้อความ
     wl_text = f"ความสูง {wl} ม.รทก. (ห่างจากตลิ่ง {round(bank_level - wl, 2)} เมตร)" if wl else "รออัปเดต"
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge else "รออัปเดต"
-    hotspot_text = f"ตรวจพบ {hotspots} จุด" if hotspots != "N/A" else "ไม่พบความร้อนผิดปกติ"
+    
+    # ✅ ปรับแก้ตรรกะใหม่ ให้ AI ไม่งงเวลาดาวเทียมพัง
+    if hotspots == "N/A":
+        hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว ไม่สามารถระบุได้"
+    elif hotspots == 0:
+        hotspot_text = "0 จุด (ไม่พบการเผาไหม้ในพื้นที่ ปลอดภัย)"
+    else:
+        hotspot_text = f"ตรวจพบ {hotspots} จุด (เฝ้าระวังการเผาไหม้)"
 
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง ไม่จำเจ
     ข้อมูลดิบ: {date_str} {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
     - ฝุ่น PM 2.5: {pm25} (ห้ามพิมพ์ตัวเลข ให้บอกความรู้สึก)
-    - ดาวเทียม: พบจุดความร้อน {hotspot_text} (รัศมี 10 กม. รอบอินทร์บุรี)
+    - ดาวเทียม VIIRS (รัศมี 10 กม. รอบอินทร์บุรี): {hotspot_text}
     - ระดับน้ำ: {wl_text}, ระบายเขื่อน: {discharge_text}
 
     กฎ:
-    1. ถ้าพบจุดความร้อน (hotspots > 0) ให้เตือนชาวบ้านเรื่องการเผาหรือระวังไฟและควัน
+    1. วิเคราะห์เรื่องจุดความร้อนให้สอดคล้องกับข้อความที่ให้ไป ห้ามพูดขัดแย้งกันเอง
     2. ห้ามใช้คำลงท้าย "ครับ/ค่ะ" เด็ดขาด
     3. ผลลัพธ์ต้องออกมาตามโครงสร้างนี้เป๊ะๆ:
 
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
     
     🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
-    🔥 **เฝ้าระวังความร้อน (ดาวเทียม):** [สรุปเรื่องจุดความร้อนและการเผาในพื้นที่]
+    🔥 **เฝ้าระวังความร้อน (ดาวเทียม):** [สรุปเรื่องจุดความร้อนตามข้อมูล]
     🌊 **ระดับน้ำอินทร์บุรี:** [สรุปตัวเลขน้ำและความอุ่นใจ]
     🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ]
 
     📌 **สรุป:** [สรุปภาพรวมสั้นๆ 1-2 บรรทัด]
     """
     
-    # ✅ ระบบ Retry ของ Gemini คงเดิม
     max_retries = 3
     final_post = ""
     for attempt in range(max_retries):
