@@ -1,7 +1,6 @@
 name: Daily Inburi News
 
 on:
-  
   workflow_dispatch: 
 
 jobs:
@@ -22,7 +21,7 @@ jobs:
       - name: Install Libraries & Playwright
         run: |
           python -m pip install --upgrade pip
-          pip install requests google-genai pytz beautifulsoup4 playwright
+          pip install -r requirements.txt
           playwright install chromium --with-deps
 
       - name: Run Main Script
@@ -30,4 +29,5 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
+          EE_JSON_KEY: ${{ secrets.EE_JSON_KEY }}
         run: python main.py
