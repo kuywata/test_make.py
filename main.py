@@ -115,24 +115,45 @@ def get_weather():
     except: pass
     return temp, pm25, rain_prob, humidity, wind, uv
 
+# --- นำโค้ดดึงน้ำจาก main01.py ที่ทำงานได้ดีที่สุดมาใส่คืนให้ครับ ---
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
-    water_level, bank_level = None, 13.10 
+    water_level = None
+    bank_level = 13.10 
+    
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         try:
             page.goto(url, timeout=60000)
             page.wait_for_selector("th[scope='row']", timeout=30000)
-            soup = BeautifulSoup(page.content(), "html.parser")
+            html = page.content()
+            
+            soup = BeautifulSoup(html, "html.parser")
             for th in soup.select("th[scope='row']"):
                 if "อินทร์บุรี" in th.get_text(strip=True):
-                    cols = th.find_parent("tr").find_all("td")
-                    nums = [float(re.sub(r"[^0-9\.\-]", "", td.get_text(strip=True))) for td in cols if re.sub(r"[^0-9\.\-]", "", td.get_text(strip=True))]
-                    if nums: water_level = nums[0]; break
-        except: pass
-        finally: browser.close()
+                    tr = th.find_parent("tr")
+                    cols = tr.find_all("td")
+                    numeric_values = []
+                    for td in cols:
+                        text = td.get_text(strip=True)
+                        try:
+                            # ป้องกัน Error จากตัวหนังสือและช่องว่าง
+                            cleaned = re.sub(r"[ ,]", "", text)
+                            cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
+                            if cleaned and cleaned != "-":
+                                numeric_values.append(float(cleaned))
+                        except: continue
+                    if numeric_values:
+                        water_level = numeric_values[0]
+                        break
+        except Exception as e:
+            print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
+        finally:
+            browser.close()
+            
     return water_level, bank_level
+# ----------------------------------------------------------------
 
 def fetch_chao_phraya_dam_discharge():
     url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
@@ -158,7 +179,7 @@ if __name__ == "__main__":
     wl_text = f"ความสูง {wl} ม.รทก. (ห่างจากตลิ่ง {round(bank_level - wl, 2)} เมตร)" if wl else "รออัปเดต"
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge else "รออัปเดต"
     
-    # ✅ ปรับแก้ตรรกะใหม่ ให้ AI ไม่งงเวลาดาวเทียมพัง
+    # ✅ ตรรกะใหม่ ให้ AI ไม่งงเวลาดาวเทียมพัง
     if hotspots == "N/A":
         hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว ไม่สามารถระบุได้"
     elif hotspots == 0:
