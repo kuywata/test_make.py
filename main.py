@@ -115,7 +115,6 @@ def get_weather():
     except: pass
     return temp, pm25, rain_prob, humidity, wind, uv
 
-# --- นำโค้ดดึงน้ำจาก main01.py ที่ทำงานได้ดีที่สุดมาใส่คืนให้ครับ ---
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
     water_level = None
@@ -138,7 +137,6 @@ def get_inburi_data():
                     for td in cols:
                         text = td.get_text(strip=True)
                         try:
-                            # ป้องกัน Error จากตัวหนังสือและช่องว่าง
                             cleaned = re.sub(r"[ ,]", "", text)
                             cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
                             if cleaned and cleaned != "-":
@@ -153,7 +151,6 @@ def get_inburi_data():
             browser.close()
             
     return water_level, bank_level
-# ----------------------------------------------------------------
 
 def fetch_chao_phraya_dam_discharge():
     url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
@@ -176,18 +173,20 @@ if __name__ == "__main__":
     discharge = fetch_chao_phraya_dam_discharge()
     hotspots = get_hotspots()
     
-    wl_text = f"ความสูง {wl} ม.รทก. (ห่างจากตลิ่ง {round(bank_level - wl, 2)} เมตร)" if wl else "รออัปเดต"
+    # ปรับหน่วยจาก ม.รทก. เป็น เมตร ตามกฎการเขียน
+    wl_text = f"ระดับน้ำ {wl} เมตร (ห่างจากตลิ่ง {round(bank_level - wl, 2)} เมตร)" if wl else "รออัปเดต"
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge else "รออัปเดต"
     
-    # ✅ ตรรกะใหม่ ให้ AI ไม่งงเวลาดาวเทียมพัง
+    # ปรับตรรกะ Hotspot เตือนเรื่องเผาไร่นา ไม่ใช้คำว่าไฟป่า
     if hotspots == "N/A":
-        hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว ไม่สามารถระบุได้"
+        hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว"
     elif hotspots == 0:
-        hotspot_text = "0 จุด (ไม่พบการเผาไหม้ในพื้นที่ ปลอดภัย)"
+        hotspot_text = "ไม่พบจุดเผาในพื้นที่ ปลอดภัยดี"
     else:
-        hotspot_text = f"ตรวจพบ {hotspots} จุด (เฝ้าระวังการเผาไหม้)"
+        hotspot_text = f"ตรวจพบ {hotspots} จุด (เฝ้าระวังควันจากการเผาไร่/นา)"
 
-   prompt = f"""
+    # รวมกฎการเขียนใหม่ทั้งหมดไว้ใน Prompt
+    prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
     ข้อมูลดิบ: {date_str} {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
@@ -198,11 +197,11 @@ if __name__ == "__main__":
 
     กฎการเขียน:
     1. จุดความร้อน: ถ้าพบ ให้เตือนเรื่อง 'ควันจากการเผาไร่/นา' ห้ามพูดว่าไฟป่าเด็ดขาด (อินทร์บุรีไม่มีป่า)
-    2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. ให้เปลี่ยนเป็น 'เมตร')
-    3. ความไม่จำเจ: ให้ใส่ 'อารมณ์ขัน' หรือ 'การทักทายตามวัน' ลงไปในสรุป
-    4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ผลลัพธ์ต้องออกมาตามโครงสร้างนี้:
+    3. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. ให้เปลี่ยนเป็น 'เมตร')
+    ความไม่จำเจ: ให้ใส่ 'อารมณ์ขัน' หรือ 'การทักทายตามวัน' ลงไปในสรุป
+    5. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
 
+    โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
     
     🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
@@ -218,7 +217,11 @@ if __name__ == "__main__":
     for attempt in range(max_retries):
         try:
             print(f"กำลังร่างโพสต์ (รอบที่ {attempt+1})...")
-            response = client.models.generate_content(model='gemini-2.5-flash', contents=prompt)
+            response = client.models.generate_content(
+                model='gemini-2.0-flash', 
+                contents=prompt,
+                config={'temperature': 0.8}
+            )
             final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
             break
         except Exception as e:
