@@ -159,9 +159,13 @@ def fetch_chao_phraya_dam_discharge():
         match = re.search(r'var json_data = (\[.*\]);', res.text)
         if match:
             data = json.loads(match.group(1))
-            val = data[0]['itc_water']['C13']['outflow']
+            # DEBUG: ดู key ทั้งหมดใน C13
+            print("🔍 C13 keys:", data[0]['itc_water']['C13'].keys())
+            print("🔍 C13 data:", data[0]['itc_water']['C13'])
+            val = data[0]['itc_water']['C13']['storage']  # ← กลับมาใช้ storage ก่อน
             return float(val) if isinstance(val, (int, float)) else float(str(val).replace(',', ''))
-    except: pass
+    except Exception as e:
+        print(f"⚠️ เขื่อน error: {e}")
     return None
 
 if __name__ == "__main__":
