@@ -210,7 +210,7 @@ if __name__ == "__main__":
     📌 **สรุป:** [ใส่ความจำเจ/อารมณ์ขัน/ทักทายตามวัน 1-2 บรรทัด]
     """
     
-   max_retries = 3
+    max_retries = 3
     final_post = ""
     for attempt in range(max_retries):
         try:
