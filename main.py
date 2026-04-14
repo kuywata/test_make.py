@@ -210,26 +210,26 @@ if __name__ == "__main__":
     📌 **สรุป:** [ใส่ความจำเจ/อารมณ์ขัน/ทักทายตามวัน 1-2 บรรทัด]
     """
     
-    max_retries = 3
+   max_retries = 3
     final_post = ""
     for attempt in range(max_retries):
-    try:                          # ← ต้องเยื้อง 4 spaces
-        print(f"กำลังร่างโพสต์ (รอบที่ {attempt+1})...")
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config={'temperature': 1.0}
-        )
-        final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
-        break
-    except Exception as e:
-        print(f"Error: {e}")
-        if attempt < max_retries - 1:
-            wait = 5 * (3 ** attempt)  # 5, 15, 45 วินาที
-            print(f"รอ {wait} วินาที...")
-            time.sleep(wait)
-        else:
-            final_post = "**สถานการณ์อินทร์บุรี**... (ระบบ AI ขัดข้องชั่วคราว)"
+        try:
+            print(f"กำลังร่างโพสต์ (รอบที่ {attempt+1})...")
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config={'temperature': 1.0}
+            )
+            final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+            if attempt < max_retries - 1:
+                wait = 5 * (3 ** attempt)  # 5, 15, 45 วินาที
+                print(f"รอ {wait} วินาที...")
+                time.sleep(wait)
+            else:
+                final_post = "**สถานการณ์อินทร์บุรี**... (ระบบ AI ขัดข้องชั่วคราว)"
 
     print("\nข้อความที่จะโพสต์:\n", final_post)
     
