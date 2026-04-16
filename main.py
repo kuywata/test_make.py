@@ -44,12 +44,41 @@ def get_hotspots():
         credentials = ee.ServiceAccountCredentials(json_key['client_email'], key_data=EE_JSON_KEY)
         ee.Initialize(credentials)
 
-        inburi_area = ee.Geometry.Point([100.3273, 15.0076]).buffer(10000)
-        end_date = ee.Date(datetime.now())
-        start_date = end_date.advance(-24, 'hour')
-        fire_col = ee.ImageCollection("FIRMS").filterBounds(inburi_area).filterDate(start_date, end_date)
+        # 1. กำหนดจุดศูนย์กลางอินทร์บุรี และปรับรัศมี (Buffer) ที่ 12,000 เมตร
+        inburi_area = ee.Geometry.Point([100.3273, 15.0076]).buffer(12000)
         
-        return fire_col.size().getInfo()
+        # 2. ดึงข้อมูล FIRMS ย้อนหลัง 24 ชั่วโมง
+        end_date = ee.Date(datetime.now(tz))
+        start_date = end_date.advance(-24, 'hour')
+        
+        dataset = ee.ImageCollection("FIRMS") \
+            .filterBounds(inburi_area) \
+            .filterDate(start_date, end_date)
+
+        # หากไม่มีดาวเทียมบินผ่านเลย ให้ถือว่าไม่พบข้อมูล
+        if dataset.size().getInfo() == 0:
+            return 0
+
+        # 3. รวบรวมภาพทั้งหมดใน 24 ชม. และเลือกแบนด์ T21 (อุณหภูมิความร้อน)
+        fires = dataset.select('T21').max()
+
+        # สร้าง Mask กรองเฉพาะจุดที่มีการเผาไหม้จริงๆ
+        fire_mask = fires.gt(0)
+        fires_masked = fires.updateMask(fire_mask)
+
+        # 4. นับจำนวนพิกเซล (จุดความร้อน) ภายในพื้นที่อินทร์บุรี
+        stats = fires_masked.reduceRegion(
+            reducer=ee.Reducer.count(),
+            geometry=inburi_area,
+            scale=1000,  # ความละเอียดดาวเทียมอยู่ที่ประมาณ 1 กม. ต่อพิกเซล
+            maxPixels=1e9
+        )
+
+        count = stats.get('T21').getInfo()
+        
+        # คืนค่าจำนวนจุด (ถ้าเป็น None แปลว่าไม่พบการเผา ให้คืนค่า 0)
+        return int(count) if count is not None else 0
+
     except Exception as e:
         print(f"⚠️ ระบบดาวเทียมขัดข้อง: {e}")
         return "N/A"
@@ -174,8 +203,15 @@ if __name__ == "__main__":
     discharge = fetch_chao_phraya_dam_discharge()
     hotspots = get_hotspots()
     
-    wl_text = f"ระดับน้ำ {wl} เมตร (ห่างจากตลิ่ง {round(bank_level - wl, 2)} เมตร)" if wl is not None else "รออัปเดต"
-    discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge else "รออัปเดต"
+    if wl is not None:
+        diff = round(bank_level - wl, 2)
+        if diff < 0:
+            wl_text = f"ระดับน้ำ {wl} เมตร (⚠️ เกินตลิ่ง {abs(diff)} เมตร)"
+        else:
+            wl_text = f"ระดับน้ำ {wl} เมตร (ห่างจากตลิ่ง {diff} เมตร)"
+    else:
+        wl_text = "รออัปเดต"
+    discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
     
     if hotspots == "N/A":
         hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว"
@@ -211,7 +247,7 @@ if __name__ == "__main__":
     📌 **สรุป:** [ใส่ความจำเจ/อารมณ์ขัน/ทักทายตามวัน 1-2 บรรทัด]
     """
     
-    max_retries = 3
+    max_retries = 5
     final_post = ""
     for attempt in range(max_retries):
         try:
@@ -226,7 +262,7 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error: {e}")
             if attempt < max_retries - 1:
-                wait = 5 * (3 ** attempt)  # 5, 15, 45 วินาที
+                wait = 10 * (2 ** attempt)  # 10, 20, 40, 80 วินาที
                 print(f"รอ {wait} วินาที...")
                 time.sleep(wait)
             else:
@@ -236,4 +272,5 @@ if __name__ == "__main__":
     
     if MAKE_WEBHOOK_URL and final_post and "ขัดข้องชั่วคราว" not in final_post:
         res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post})
-        if res.status_code == 200: print("\n✅ ส่ง Webhook สำเร็จ!")
+        if res.status_code == 200: 
+            print("\n✅ ส่ง Webhook สำเร็จ!")
