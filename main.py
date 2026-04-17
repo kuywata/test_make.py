@@ -83,44 +83,177 @@ def get_hotspots():
         print(f"⚠️ ระบบดาวเทียมขัดข้อง: {e}")
         return "N/A"
 
+def _safe_float(v):
+    try:
+        return float(str(v).replace(',', '').strip())
+    except:
+        return None
+
+def _parse_air4thai_age_seconds(st):
+    patterns = [
+        "%Y-%m-%d %H:%M",
+        "%Y-%m-%d %H:%M:%S",
+        "%d/%m/%Y %H:%M",
+        "%d/%m/%Y %H:%M:%S",
+    ]
+    try:
+        lu = st.get('LastUpdate', {}) if isinstance(st, dict) else {}
+        date_text = str(lu.get('date') or st.get('date') or '').strip()
+        time_text = str(lu.get('time') or st.get('time') or '').strip()
+        if not date_text or not time_text:
+            return None
+
+        raw = f"{date_text} {time_text}"
+        dt = None
+        for fmt in patterns:
+            try:
+                dt = datetime.strptime(raw, fmt)
+                break
+            except:
+                pass
+
+        if dt is None:
+            return None
+
+        if dt.tzinfo is None:
+            dt = tz.localize(dt)
+
+        return max(0, int((datetime.now(tz) - dt).total_seconds()))
+    except:
+        return None
+
+def _weighted_pm25(rows):
+    total_w = 0.0
+    total_v = 0.0
+
+    for r in rows:
+        # ใกล้กว่า = น้ำหนักมากกว่า
+        dist_w = 1 / ((r['distance'] + 1.0) ** 1.6)
+
+        # ใหม่กว่า = น้ำหนักมากกว่า
+        age_w = max(0.15, 1 - (r['age'] / r['max_age']))
+
+        # ground station ให้เครดิตสูงกว่า model
+        source_w = 1.0 if r['source'] == 'air4thai' else 0.85
+
+        w = dist_w * age_w * source_w
+        total_w += w
+        total_v += r['pm25'] * w
+
+    if total_w == 0:
+        return None
+    return total_v / total_w
+
 def get_accurate_pm25():
     INBURI_LAT, INBURI_LON = 15.0076, 100.3273
-    MAX_DATA_AGE_SECONDS = 10800 
-    MAX_DISTANCE_KM = 50         
+
+    # ปรับให้เข้มงวดขึ้นเพื่อความ "ตรงพื้นที่"
+    STRICT_RADIUS_KM = 20
+    FALLBACK_RADIUS_KM = 35
+    MAX_DATA_AGE_SECONDS = 7200   # 2 ชั่วโมง
+
     headers = {'User-Agent': 'Mozilla/5.0'}
-    all_sources = [] 
-    
+    air4thai_rows = []
+    gistda_value = None
+    openmeteo_value = None
+
+    # 1) GISTDA: ค่าตามพิกัดตรงจุด ใช้เป็น fallback ชั้นดี
     try:
         current_ts = int(time.time())
-        url_gistda = f"https://pm25.gistda.or.th/rest/getPM25byLocation?lat={INBURI_LAT}&lng={INBURI_LON}&t={current_ts}"
+        url_gistda = (
+            f"https://pm25.gistda.or.th/rest/getPM25byLocation"
+            f"?lat={INBURI_LAT}&lng={INBURI_LON}&t={current_ts}"
+        )
         res = requests.get(url_gistda, headers=headers, timeout=15, verify=False)
         if res.status_code == 200:
-            data = res.json().get('data', res.json())
-            if 'pm25' in data and data['pm25'] is not None:
-                 all_sources.append({'pm25': float(data['pm25']), 'distance': 0, 'age': 0, 'priority': 0})
-    except: pass
+            payload = res.json()
+            data = payload.get('data', payload)
+            pm = _safe_float(data.get('pm25'))
+            if pm is not None:
+                gistda_value = pm
+    except:
+        pass
 
+    # 2) Air4Thai: ใช้สถานีใกล้ + สด เป็นตัวหลัก
     try:
-        res = requests.get(f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}", headers=headers, timeout=15, verify=False)
+        url = f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}"
+        res = requests.get(url, headers=headers, timeout=15, verify=False)
         if res.status_code == 200:
             for st in res.json().get('stations', []):
-                pm25_val = st.get('LastUpdate', {}).get('PM25', {}).get('value')
-                if not pm25_val or pm25_val == "-": continue
-                dist = get_dist(INBURI_LAT, INBURI_LON, st.get('lat'), st.get('long'))
-                if dist <= MAX_DISTANCE_KM:
-                    all_sources.append({'pm25': float(pm25_val), 'distance': dist, 'age': 0, 'priority': 1})
-    except: pass
+                pm25_val = _safe_float(st.get('LastUpdate', {}).get('PM25', {}).get('value'))
+                if pm25_val is None:
+                    continue
 
+                lat = _safe_float(st.get('lat'))
+                lon = _safe_float(st.get('long'))
+                if lat is None or lon is None:
+                    continue
+
+                dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
+                if dist > FALLBACK_RADIUS_KM:
+                    continue
+
+                age = _parse_air4thai_age_seconds(st)
+                if age is None:
+                    age = MAX_DATA_AGE_SECONDS + 1  # ถ้าอ่านเวลาไม่ได้ ให้ถือว่าเก่าไว้ก่อน
+
+                air4thai_rows.append({
+                    'source': 'air4thai',
+                    'pm25': pm25_val,
+                    'distance': dist,
+                    'age': age,
+                    'max_age': MAX_DATA_AGE_SECONDS
+                })
+    except:
+        pass
+
+    # 3) Open-Meteo: สำรองสุดท้าย
     try:
-        url = f"https://air-quality-api.open-meteo.com/v1/air-quality?latitude={INBURI_LAT}&longitude={INBURI_LON}&current=pm2_5&timezone=Asia%2FBangkok"
+        url = (
+            "https://air-quality-api.open-meteo.com/v1/air-quality"
+            f"?latitude={INBURI_LAT}&longitude={INBURI_LON}"
+            "&current=pm2_5&timezone=Asia%2FBangkok"
+        )
         res = requests.get(url, headers=headers, timeout=10)
-        if 'current' in res.json():
-            all_sources.append({'pm25': float(res.json()['current']['pm2_5']), 'distance': 0, 'age': 0, 'priority': 3})
-    except: pass
+        data = res.json()
+        if 'current' in data:
+            pm = _safe_float(data['current'].get('pm2_5'))
+            if pm is not None:
+                openmeteo_value = pm
+    except:
+        pass
 
-    if not all_sources: return "N/A"
-    all_sources.sort(key=lambda x: (x['priority'], x['distance']))
-    return f"{all_sources[0]['pm25']:.1f}"
+    # A) ถ้ามีสถานีสดและใกล้จริง ใช้สถานีเป็นหลัก
+    strict_rows = [
+        r for r in air4thai_rows
+        if r['distance'] <= STRICT_RADIUS_KM and r['age'] <= MAX_DATA_AGE_SECONDS
+    ]
+    if strict_rows:
+        strict_rows.sort(key=lambda x: (x['distance'], x['age']))
+        pm = _weighted_pm25(strict_rows[:3])   # เอา 3 สถานีใกล้สุด
+        if pm is not None:
+            return f"{pm:.1f}"
+
+    # B) ถ้าไม่มีสถานีใกล้ที่สด ใช้ GISTDA ตามพิกัด
+    if gistda_value is not None:
+        return f"{gistda_value:.1f}"
+
+    # C) ถ้ายังไม่ได้ ค่อยผ่อนเกณฑ์ Air4Thai
+    loose_rows = [
+        r for r in air4thai_rows
+        if r['distance'] <= FALLBACK_RADIUS_KM and r['age'] <= MAX_DATA_AGE_SECONDS
+    ]
+    if loose_rows:
+        loose_rows.sort(key=lambda x: (x['distance'], x['age']))
+        pm = _weighted_pm25(loose_rows[:3])
+        if pm is not None:
+            return f"{pm:.1f}"
+
+    # D) สำรองสุดท้าย
+    if openmeteo_value is not None:
+        return f"{openmeteo_value:.1f}"
+
+    return "N/A"
 
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
