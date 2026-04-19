@@ -89,7 +89,10 @@ def get_dist(lat1, lon1, lat2, lon2):
 # ─────────────────────────────────────────────
 def get_tmd_observation() -> dict:
     """
-    ดึงข้อมูลตรวจวัดจริงจากสถานีอุตุฯ ใกล้อินทร์บุรี
+    ดึงข้อมูลตรวจวัดจริงจากสถานีอุตุฯ ใกล้อินทร์บุรี/สิงห์บุรี
+    - guard body ว่าง + HTML ก่อน parse JSON
+    - radius 35 กม. ก่อน fallback 80 กม.
+    - weighted average จาก 3 สถานีใกล้สุด
     คืนค่า: { available, rain_3h, temp, humidity, wind_speed, station_name, dist_km }
     """
     result = {'available': False}
@@ -108,12 +111,15 @@ def get_tmd_observation() -> dict:
 
         raw = res.text.strip()
         if not raw:
-            print("⚠️ TMD Obs: response body ว่างเปล่า (token อาจหมดอายุ)")
+            print("⚠️ TMD Obs: response body ว่างเปล่า (ยังไม่มีข้อมูลในรอบนี้)")
+            return result
+        if raw.startswith('<'):
+            print("⚠️ TMD Obs: ได้ HTML กลับมาแทน JSON")
             return result
         try:
             data = res.json()
         except Exception as je:
-            print(f"⚠️ TMD Obs: JSON parse ไม่ได้ ({je}) | body={raw[:120]!r}")
+            print(f"⚠️ TMD Obs: JSON parse ไม่ได้ ({je})")
             return result
 
         stations = data.get('Stations', {}).get('Station', [])
@@ -142,7 +148,7 @@ def get_tmd_observation() -> dict:
                     continue
             return cands
 
-        candidates = _parse_cands(35)   # สิงห์บุรี-อินทร์บุรีก่อน
+        candidates = _parse_cands(35)
         if not candidates:
             candidates = _parse_cands(80)
             print("⚠️ TMD Obs: ไม่พบสถานีใน 35 กม. ขยายเป็น 80 กม.")
@@ -158,7 +164,7 @@ def get_tmd_observation() -> dict:
         w_hum   = sum(c['humidity']   / max(c['dist'], 0.1) ** 2 for c in top3) / total_w
         w_wind  = sum(c['wind_speed'] / max(c['dist'], 0.1) ** 2 for c in top3) / total_w
         best    = candidates[0]
-        rain_report = max(w_rain, best['rain_3h'])  # ไม่ underestimate
+        rain_report = max(w_rain, best['rain_3h'])
 
         result.update({
             'available': True,
@@ -176,51 +182,60 @@ def get_tmd_observation() -> dict:
 
 
 # ─────────────────────────────────────────────
-# TMD ชุดที่ 2: พยากรณ์จากคอมพิวเตอร์สมรรถนะสูง (NWP)
-# endpoint: https://data.tmd.go.th/api/NowcastForecast/v2/
-# พยากรณ์ราย 1 ชม. ละเอียด 2 กม. — แม่นที่สุดสำหรับพื้นที่ไทย
+# TMD ชุดที่ 2: พยากรณ์จากกรมอุตุฯ (WeatherForecast)
+# endpoint: https://data.tmd.go.th/api/WeatherForecast/v2/
 # ─────────────────────────────────────────────
 def get_tmd_nwp_forecast() -> dict:
     """
-    ดึงพยากรณ์ราย 1 ชม. จากโมเดล NWP กรมอุตุฯ ตรงพิกัดอินทร์บุรี
+    ดึงพยากรณ์รายชั่วโมงจาก TMD WeatherForecast/v2/ ตรงพิกัดอินทร์บุรี
+    (เปลี่ยนจาก NowcastForecast เพราะ endpoint นั้นส่ง HTML กลับมา)
     คืนค่า: { available, rain_1h_max, thunder_max, wind_max, temp_avg, description }
     """
     result = {'available': False}
     if not TMD_API_KEY:
         return result
-    try:
-        # ลอง NowcastForecast ก่อน (ราย 1 ชม. ล่วงหน้า 72 ชม.)
-        url = (
+
+    # ลองทุก endpoint ตามลำดับ
+    endpoints = [
+        (
+            "https://data.tmd.go.th/api/WeatherForecast/v2/"
+            f"?domain=string&APIkey={TMD_API_KEY}"
+            f"&lat={INBURI_LAT}&lon={INBURI_LON}"
+        ),
+        (
             "https://data.tmd.go.th/api/NowcastForecast/v2/"
             f"?domain=string&APIkey={TMD_API_KEY}"
             f"&lat={INBURI_LAT}&lon={INBURI_LON}"
             f"&fields=rain,tc,rh,ws,thunderstorm"
-        )
-        res = requests.get(url, timeout=15)
-        print(f"TMD NWP HTTP: {res.status_code}")
+        ),
+    ]
 
-        # fallback: WeatherForecast endpoint
-        if res.status_code != 200:
-            url2 = (
-                "https://data.tmd.go.th/api/WeatherForecast/v2/"
-                f"?domain=string&APIkey={TMD_API_KEY}"
-                f"&lat={INBURI_LAT}&lon={INBURI_LON}"
-            )
-            res = requests.get(url2, timeout=15)
-            print(f"TMD WeatherForecast fallback HTTP: {res.status_code}")
-            if res.status_code != 200:
-                return result
-
-        raw = res.text.strip()
-        if not raw:
-            print("⚠️ TMD NWP: response body ว่างเปล่า (token อาจหมดอายุ)")
-            return result
+    data = None
+    for ep_url in endpoints:
         try:
-            data = res.json()
-        except Exception as je:
-            print(f"⚠️ TMD NWP: JSON parse ไม่ได้ ({je}) | body={raw[:120]!r}")
-            return result
+            res = requests.get(ep_url, timeout=15)
+            ep_name = "WeatherForecast" if "WeatherForecast" in ep_url else "NowcastForecast"
+            print(f"TMD NWP ({ep_name}) HTTP: {res.status_code}")
+            raw = res.text.strip()
+            if not raw:
+                print(f"⚠️ TMD NWP ({ep_name}): body ว่างเปล่า")
+                continue
+            if raw.startswith('<'):
+                print(f"⚠️ TMD NWP ({ep_name}): ได้ HTML กลับมา (endpoint ไม่รองรับ)")
+                continue
+            if res.status_code == 200:
+                data = res.json()
+                print(f"✅ TMD NWP: ใช้ {ep_name}")
+                break
+        except Exception as ep_e:
+            print(f"⚠️ TMD NWP endpoint error: {ep_e}")
+            continue
 
+    if data is None:
+        print("⚠️ TMD NWP: ทุก endpoint ล้มเหลว")
+        return result
+
+    try:
         # รองรับ response หลายรูปแบบ
         wf_list   = data.get('WeatherForecasts', [])
         forecasts = (
@@ -232,7 +247,7 @@ def get_tmd_nwp_forecast() -> dict:
 
         next_6h = forecasts[:6]
         if not next_6h:
-            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์")
+            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์ (keys:", list(data.keys()), ")")
             return result
 
         rain_vals, thunder_vals, wind_vals, temp_vals = [], [], [], []
@@ -271,7 +286,7 @@ def get_tmd_nwp_forecast() -> dict:
         })
         print(f"✅ TMD NWP: ฝน={max_rain:.1f} ฟ้าคะนอง={max_thunder:.0f}% ลม={max_wind:.1f}")
     except Exception as e:
-        print(f"⚠️ TMD NWP error: {e}")
+        print(f"⚠️ TMD NWP parse error: {e}")
     return result
 
 
