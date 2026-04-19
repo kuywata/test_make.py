@@ -88,23 +88,19 @@ def get_dist(lat1, lon1, lat2, lon2):
 # ข้อมูลจริงจากสถานีตรวจอากาศทุก 3 ชั่วโมง
 # ─────────────────────────────────────────────
 def get_tmd_observation() -> dict:
-    """
-    ดึงข้อมูลตรวจวัดจริงจากสถานีอุตุฯ ใกล้อินทร์บุรี/สิงห์บุรี
-    - guard body ว่าง + HTML ก่อน parse JSON
-    - radius 35 กม. ก่อน fallback 80 กม.
-    - weighted average จาก 3 สถานีใกล้สุด
-    คืนค่า: { available, rain_3h, temp, humidity, wind_speed, station_name, dist_km }
-    """
     result = {'available': False}
     if not TMD_API_KEY:
         print("⚠️ TMD_API_KEY ไม่พบ")
         return result
     try:
+        # แก้จุดที่ 1: ลบ domain=string ออก
         url = (
             "https://data.tmd.go.th/api/Weather3Hours/v2/"
-            f"?domain=string&APIkey={TMD_API_KEY}&station_type=ตรวจอากาศผิวพื้น"
+            f"?APIkey={TMD_API_KEY}&station_type=ตรวจอากาศผิวพื้น"
         )
-        res = requests.get(url, timeout=15)
+        # เพิ่ม headers บังคับขอรับข้อมูลเป็น JSON
+        headers = {'Accept': 'application/json'}
+        res = requests.get(url, headers=headers, timeout=15)
         print(f"TMD Observation HTTP: {res.status_code}")
         if res.status_code != 200:
             return result
@@ -186,34 +182,30 @@ def get_tmd_observation() -> dict:
 # endpoint: https://data.tmd.go.th/api/WeatherForecast/v2/
 # ─────────────────────────────────────────────
 def get_tmd_nwp_forecast() -> dict:
-    """
-    ดึงพยากรณ์รายชั่วโมงจาก TMD WeatherForecast/v2/ ตรงพิกัดอินทร์บุรี
-    (เปลี่ยนจาก NowcastForecast เพราะ endpoint นั้นส่ง HTML กลับมา)
-    คืนค่า: { available, rain_1h_max, thunder_max, wind_max, temp_avg, description }
-    """
     result = {'available': False}
     if not TMD_API_KEY:
         return result
 
-    # ลองทุก endpoint ตามลำดับ
+    # แก้จุดที่ 2: ลบ domain=string ออกจากทั้ง 2 endpoint
     endpoints = [
         (
             "https://data.tmd.go.th/api/WeatherForecast/v2/"
-            f"?domain=string&APIkey={TMD_API_KEY}"
+            f"?APIkey={TMD_API_KEY}"
             f"&lat={INBURI_LAT}&lon={INBURI_LON}"
         ),
         (
             "https://data.tmd.go.th/api/NowcastForecast/v2/"
-            f"?domain=string&APIkey={TMD_API_KEY}"
+            f"?APIkey={TMD_API_KEY}"
             f"&lat={INBURI_LAT}&lon={INBURI_LON}"
             f"&fields=rain,tc,rh,ws,thunderstorm"
         ),
     ]
 
     data = None
+    headers = {'Accept': 'application/json'} # เพิ่ม headers ตรงนี้
     for ep_url in endpoints:
         try:
-            res = requests.get(ep_url, timeout=15)
+            res = requests.get(ep_url, headers=headers, timeout=15)
             ep_name = "WeatherForecast" if "WeatherForecast" in ep_url else "NowcastForecast"
             print(f"TMD NWP ({ep_name}) HTTP: {res.status_code}")
             raw = res.text.strip()
@@ -236,7 +228,6 @@ def get_tmd_nwp_forecast() -> dict:
         return result
 
     try:
-        # รองรับ response หลายรูปแบบ
         wf_list   = data.get('WeatherForecasts', [])
         forecasts = (
             (wf_list[0].get('forecasts', []) if isinstance(wf_list, list) and wf_list else [])
@@ -302,7 +293,8 @@ def get_actual_rain_last_hour() -> dict:
             f"&hourly=precipitation&past_hours=3&forecast_hours=1"
             f"&timezone=Asia%2FBangkok"
         )
-        res    = requests.get(url, timeout=10).json()
+        # แก้จุดที่ 3: เปลี่ยน timeout เป็น 20
+        res    = requests.get(url, timeout=20).json()
         times  = res['hourly']['time']
         precip = res['hourly']['precipitation']
 
@@ -321,7 +313,6 @@ def get_actual_rain_last_hour() -> dict:
     except Exception as e:
         print(f"⚠️ Open-Meteo actual rain error: {e}")
     return result
-
 
 # ─────────────────────────────────────────────
 # Tomorrow.io: minutely + 6h forecast
