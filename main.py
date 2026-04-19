@@ -25,10 +25,12 @@ tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
 THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
                "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
-thai_month = THAI_MONTHS[now.month - 1]
-thai_year  = now.year + 543
-date_str   = f"{now.day} {thai_month} {thai_year}"
-time_str   = now.strftime("%H:%M น.")
+THAI_DAYS   = ["จันทร์", "อังคาร", "พุธ", "พฤหัสบดี", "ศุกร์", "เสาร์", "อาทิตย์"]
+thai_month       = THAI_MONTHS[now.month - 1]
+thai_year        = now.year + 543
+thai_day_of_week = THAI_DAYS[now.weekday()]   # 0=จันทร์ … 6=อาทิตย์
+date_str         = f"{now.day} {thai_month} {thai_year}"
+time_str         = now.strftime("%H:%M น.")
 
 INBURI_LAT = 14.9961
 INBURI_LON = 100.3253
@@ -87,10 +89,7 @@ def get_dist(lat1, lon1, lat2, lon2):
 # ─────────────────────────────────────────────
 def get_tmd_observation() -> dict:
     """
-    ดึงข้อมูลตรวจวัดจริงจากสถานีอุตุฯ ใกล้อินทร์บุรี/สิงห์บุรี
-    - ตรวจ response body ก่อน parse JSON เสมอ (ป้องกัน empty body จาก TMD)
-    - ลอง radius 35 กม. ก่อน (สิงห์บุรี-อินทร์บุรี) fallback 80 กม.
-    - weighted average จาก 3 สถานีใกล้สุด + ใช้ค่าฝนสูงสุดเพื่อไม่ underestimate
+    ดึงข้อมูลตรวจวัดจริงจากสถานีอุตุฯ ใกล้อินทร์บุรี
     คืนค่า: { available, rain_3h, temp, humidity, wind_speed, station_name, dist_km }
     """
     result = {'available': False}
@@ -107,90 +106,46 @@ def get_tmd_observation() -> dict:
         if res.status_code != 200:
             return result
 
-        # ── guard: ตรวจ body ก่อน parse ──────────────────────────────────
-        raw = res.text.strip()
-        if not raw:
-            print("⚠️ TMD Obs: response body ว่างเปล่า")
-            return result
-        try:
-            data = res.json()
-        except Exception as je:
-            print(f"⚠️ TMD Obs: JSON parse error ({je}) | body[:120]={raw[:120]!r}")
-            return result
-        # ─────────────────────────────────────────────────────────────────
-
+        data     = res.json()
         stations = data.get('Stations', {}).get('Station', [])
 
-        def parse_candidates(max_dist_km):
-            cands = []
-            for st in stations:
-                try:
-                    lat  = float(st.get('Latitude', 0))
-                    lon  = float(st.get('Longitude', 0))
-                    dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
-                    if dist > max_dist_km:
-                        continue
-                    obs      = st.get('Observation', {})
-                    rain_raw = obs.get('Rainfall', {})
-                    rain     = (float(rain_raw.get('Value') or 0)
-                                if isinstance(rain_raw, dict) else float(rain_raw or 0))
-                    temp     = float((obs.get('AirTemperature', {}) or {}).get('Value') or 0)
-                    hum      = float((obs.get('RelativeHumidity', {}) or {}).get('Value') or 0)
-                    wind     = float((obs.get('WindSpeed', {}) or {}).get('Value') or 0)
-                    cands.append({
-                        'name': st.get('StationNameThai', st.get('StationNameEng', '?')),
-                        'dist': dist, 'rain_3h': rain,
-                        'temp': temp, 'humidity': hum, 'wind_speed': wind,
-                    })
-                except Exception:
+        candidates = []
+        for st in stations:
+            try:
+                lat  = float(st.get('Latitude', 0))
+                lon  = float(st.get('Longitude', 0))
+                dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
+                if dist > 100:
                     continue
-            return cands
+                obs      = st.get('Observation', {})
+                rain_raw = obs.get('Rainfall', {})
+                rain     = float(rain_raw.get('Value') or 0) if isinstance(rain_raw, dict) else float(rain_raw or 0)
+                temp     = float((obs.get('AirTemperature', {}) or {}).get('Value') or 0)
+                hum      = float((obs.get('RelativeHumidity', {}) or {}).get('Value') or 0)
+                wind     = float((obs.get('WindSpeed', {}) or {}).get('Value') or 0)
+                candidates.append({
+                    'name': st.get('StationNameThai', st.get('StationNameEng', '?')),
+                    'dist': dist, 'rain_3h': rain,
+                    'temp': temp, 'humidity': hum, 'wind_speed': wind,
+                })
+            except Exception:
+                continue
 
-        # ลอง 35 กม. (สิงห์บุรี-อินทร์บุรี) ก่อน
-        candidates = parse_candidates(35)
-        used_radius = 35
         if not candidates:
-            candidates = parse_candidates(80)
-            used_radius = 80
-            print("⚠️ TMD Obs: ไม่พบสถานีใน 35 กม. ขยายเป็น 80 กม.")
-
-        if not candidates:
-            print("⚠️ TMD Obs: ไม่พบสถานีในรัศมีใดเลย")
             return result
 
         candidates.sort(key=lambda x: x['dist'])
-        top3 = candidates[:3]
-
-        # weighted average (น้ำหนัก 1/dist²)
-        total_w = sum(1.0 / max(c['dist'], 0.1) ** 2 for c in top3)
-        if total_w > 0:
-            w_rain = sum(c['rain_3h']    * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
-            w_temp = sum(c['temp']       * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
-            w_hum  = sum(c['humidity']   * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
-            w_wind = sum(c['wind_speed'] * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
-        else:
-            best   = top3[0]
-            w_rain, w_temp, w_hum, w_wind = (best['rain_3h'], best['temp'],
-                                              best['humidity'], best['wind_speed'])
-
         best = candidates[0]
-        # ใช้ค่าฝนสูงสุดระหว่าง weighted avg กับสถานีใกล้สุด (ไม่ underestimate)
-        rain_report = max(w_rain, best['rain_3h'])
-
         result.update({
             'available': True,
-            'rain_3h': round(rain_report, 2),
-            'temp': round(w_temp, 1),
-            'humidity': round(w_hum, 1),
-            'wind_speed': round(w_wind, 1),
+            'rain_3h': best['rain_3h'],
+            'temp': best['temp'],
+            'humidity': best['humidity'],
+            'wind_speed': best['wind_speed'],
             'station_name': best['name'],
             'dist_km': round(best['dist'], 1),
-            'radius_used': used_radius,
-            'station_count': len(top3),
         })
-        print(f"✅ TMD Obs ({len(top3)} สถานี, r={used_radius}กม.): "
-              f"ใกล้สุด={best['name']} {best['dist']:.1f}กม. "
-              f"ฝน={rain_report:.2f}มม.")
+        print(f"✅ TMD Obs: {best['name']} ห่าง {best['dist']:.1f} กม. ฝน={best['rain_3h']} มม.")
     except Exception as e:
         print(f"⚠️ TMD Observation error: {e}")
     return result
@@ -232,34 +187,19 @@ def get_tmd_nwp_forecast() -> dict:
             if res.status_code != 200:
                 return result
 
-        # ── guard: ตรวจ body ก่อน parse ──────────────────────────────────
-        raw = res.text.strip()
-        if not raw:
-            print("⚠️ TMD NWP: response body ว่างเปล่า")
-            return result
-        try:
-            data = res.json()
-        except Exception as je:
-            print(f"⚠️ TMD NWP: JSON parse error ({je}) | body[:120]={raw[:120]!r}")
-            return result
-        # ─────────────────────────────────────────────────────────────────
+        data = res.json()
 
         # รองรับ response หลายรูปแบบ
-        wf_list = data.get('WeatherForecasts', [])
         forecasts = (
-            (wf_list[0].get('forecasts', []) if isinstance(wf_list, list) and wf_list else [])
+            data.get('WeatherForecasts', [{}])[0].get('forecasts', [])
             or data.get('forecasts', [])
             or data.get('Forecasts', [])
-            or (wf_list if isinstance(wf_list, list) else [])
+            or data.get('WeatherForecasts', [])
         )
-
-        if not forecasts:
-            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์ (keys:", list(data.keys()), ")")
-            return result
 
         next_6h = forecasts[:6]
         if not next_6h:
-            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์ใน 6 ชม.")
+            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์")
             return result
 
         rain_vals, thunder_vals, wind_vals, temp_vals = [], [], [], []
@@ -477,17 +417,10 @@ def get_comprehensive_rain_info() -> dict:
     # ── ระดับความเสี่ยงรวม ────────────────────
     nwp_rain    = tmd_nwp.get('rain_1h_max', 0) or 0
     nwp_thunder = tmd_nwp.get('thunder_max', 0) or 0
-    obs_rain_3h = tmd_obs.get('rain_3h', 0) or 0
     has_danger  = (bool(tmr.get('danger_slots')) or nwp_rain >= 35
-                   or (nwp_rain >= 20 and nwp_thunder >= 50)
-                   or actual_rain_best >= 15
-                   or obs_rain_3h >= 30)
-    has_warn    = (bool(tmr.get('warn_slots'))   or nwp_rain >= 10
-                   or actual_rain_best >= 5
-                   or obs_rain_3h >= 10)
-    has_watch   = (bool(tmr.get('watch_slots'))  or nwp_rain >= 1
-                   or actual_rain_best >= 1
-                   or obs_rain_3h >= 1)
+                   or (nwp_rain >= 20 and nwp_thunder >= 50) or actual_rain_best >= 15)
+    has_warn    = (bool(tmr.get('warn_slots'))   or nwp_rain >= 10 or actual_rain_best >= 5)
+    has_watch   = (bool(tmr.get('watch_slots'))  or nwp_rain >= 1  or actual_rain_best >= 1)
 
     risk_level = ('danger' if has_danger else
                   'warn'   if has_warn   else
@@ -776,7 +709,7 @@ if __name__ == "__main__":
 
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
-    ข้อมูลดิบ: {date_str} {time_str}
+    ข้อมูลดิบ: วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
     - ฝุ่น PM 2.5: {pm25} (บอกความรู้สึกแบบบ้านๆ ไม่ต้องบอกตัวเลข)
     - {watch_title}: {watch_data}
@@ -786,19 +719,19 @@ if __name__ == "__main__":
     กฎการเขียน:
     1. {watch_title}: {watch_rule}
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
-    3. ความไม่จำเจ: ใส่อารมณ์ขันหรือทักทายตามวันลงในสรุป
+    3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลที่ให้มา
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
     5. ระดับน้ำและเขื่อน: พูดแนวโน้มแบบธรรมชาติ ไม่ต้องพูดตัวเลขซ้ำ
 
     โครงสร้างโพสต์:
-    **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
+    **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
 
     🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
     {watch_icon} **{watch_title}:** [สรุปตาม {watch_rule}]
     🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำเป็นเมตร พร้อมแนวโน้มเทียบเมื่อวานถ้ามี]
     🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ พร้อมแนวโน้มถ้ามี]
 
-    📌 **สรุป:** [อารมณ์ขัน/ทักทายตามวัน 1-2 บรรทัด]
+    📌 **สรุป:** [ทักทายตามวัน{thai_day_of_week} 1-2 บรรทัด]
     """
 
     max_retries = 5
