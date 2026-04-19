@@ -32,4 +32,6 @@ jobs:
           TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
           TMD_API_KEY: ${{ secrets.TMD_API_KEY }}
           EE_JSON_KEY: ${{ secrets.EE_JSON_KEY }}
+          WAQI_TOKEN: ${{ secrets.WAQI_TOKEN }}
+          OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
         run: python main.py
