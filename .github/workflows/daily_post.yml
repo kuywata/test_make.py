@@ -30,5 +30,6 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
+          TMD_API_KEY: ${{ secrets.TMD_API_KEY }}
           EE_JSON_KEY: ${{ secrets.EE_JSON_KEY }}
         run: python main.py
