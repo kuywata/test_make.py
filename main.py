@@ -554,10 +554,12 @@ def _weighted_pm25(rows):
     return total_v / total_w if total_w else None
 
 def get_accurate_pm25():
-    STRICT_KM, FALLBACK_KM, MAX_AGE = 20, 35, 7200
+    # ปรับจูนเพื่อความแม่นยำสูงสุด: รัศมีสูงสุด 20 กม. และข้อมูลต้องไม่เก่าเกิน 1 ชม.
+    STRICT_KM, FALLBACK_KM, MAX_AGE = 20, 20, 3600
     headers = {'User-Agent': 'Mozilla/5.0'}
     air4thai_rows, gistda_value, openmeteo_value = [], None, None
 
+    # 1. ดึงข้อมูล GISTDA (ดาวเทียมอิงพิกัด)
     try:
         res = requests.get(
             f"https://pm25.gistda.or.th/rest/getPM25byLocation"
@@ -567,8 +569,10 @@ def get_accurate_pm25():
             payload = res.json()
             pm = _safe_float((payload.get('data', payload)).get('pm25'))
             if pm is not None: gistda_value = pm
-    except: pass
+    except Exception as e:
+        print(f"⚠️ GISTDA error: {e}")
 
+    # 2. ดึงข้อมูล Air4Thai (สถานีตรวจวัด)
     try:
         res = requests.get(
             f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}",
@@ -581,37 +585,46 @@ def get_accurate_pm25():
                 lon = _safe_float(st.get('long'))
                 if lat is None or lon is None: continue
                 dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
-                if dist > FALLBACK_KM: continue
+                if dist > FALLBACK_KM: continue  # ตัดสถานีที่ไกลเกิน 20 กม. ทิ้งทันที
                 age = _parse_air4thai_age_seconds(st) or (MAX_AGE + 1)
                 air4thai_rows.append({'source': 'air4thai', 'pm25': pm25_val,
                                       'distance': dist, 'age': age, 'max_age': MAX_AGE})
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Air4Thai error: {e}")
 
+    # 3. ดึงข้อมูล Open-Meteo (แหล่งสำรองสุดท้าย)
     try:
         res = requests.get(
             f"https://air-quality-api.open-meteo.com/v1/air-quality"
             f"?latitude={INBURI_LAT}&longitude={INBURI_LON}&current=pm2_5&timezone=Asia%2FBangkok",
-            headers=headers, timeout=10).json()
-        if 'current' in res:
-            pm = _safe_float(res['current'].get('pm2_5'))
+            headers=headers, timeout=20)  # เพิ่ม timeout เป็น 20 วิ
+        res.raise_for_status()  # ดักจับ Error HTTP
+        data = res.json()
+        if 'current' in data:
+            pm = _safe_float(data['current'].get('pm2_5'))
             if pm is not None: openmeteo_value = pm
-    except: pass
+    except Exception as e:
+        print(f"⚠️ Open-Meteo error: {e}")
 
-    strict = [r for r in air4thai_rows if r['distance'] <= STRICT_KM and r['age'] <= MAX_AGE]
-    if strict:
-        strict.sort(key=lambda x: (x['distance'], x['age']))
-        pm = _weighted_pm25(strict[:3])
-        if pm is not None: return f"{pm:.1f}"
+    # ลำดับการตัดสินใจ (Decision Logic)
 
-    if gistda_value is not None: return f"{gistda_value:.1f}"
+    # แบบที่ 1: สถานี Air4Thai ในรัศมี 20 กม. ที่ข้อมูลอัปเดตล่าสุด (น่าเชื่อถือที่สุด)
+    valid_air4thai = [r for r in air4thai_rows if r['age'] <= MAX_AGE]
+    if valid_air4thai:
+        valid_air4thai.sort(key=lambda x: (x['distance'], x['age']))
+        pm = _weighted_pm25(valid_air4thai[:3])
+        if pm is not None:
+            return f"{pm:.1f}"
 
-    loose = [r for r in air4thai_rows if r['distance'] <= FALLBACK_KM and r['age'] <= MAX_AGE]
-    if loose:
-        loose.sort(key=lambda x: (x['distance'], x['age']))
-        pm = _weighted_pm25(loose[:3])
-        if pm is not None: return f"{pm:.1f}"
+    # แบบที่ 2: ถ้าไม่มีสถานี หรือสถานีไม่อัปเดต ให้ใช้พิกัด GISTDA
+    if gistda_value is not None:
+        return f"{gistda_value:.1f}"
 
-    if openmeteo_value is not None: return f"{openmeteo_value:.1f}"
+    # แบบที่ 3: แหล่งสำรองสุดท้าย Open-Meteo
+    if openmeteo_value is not None:
+        return f"{openmeteo_value:.1f}"
+
+    # หากล่มทั้งหมด ให้รีเทิร์น N/A เพื่อให้บอทแจ้งเตือนลูกเพจเรื่องเซ็นเซอร์ขัดข้อง
     return "N/A"
 
 def get_weather():
@@ -698,6 +711,12 @@ if __name__ == "__main__":
 
     temp, _, rain_prob, humidity, wind, uv = get_weather()
     pm25           = get_accurate_pm25()
+
+    # ดักค่า N/A ก่อนส่งให้ AI เพื่อป้องกันการมโนข้อมูล
+    if pm25 == "N/A":
+        pm25_instruction = "เซ็นเซอร์ขัดข้อง ดึงค่าไม่ได้ ให้เขียนบอกลูกเพจไปตามตรงว่าระบบขัดข้อง แต่ให้เตือนว่าควรใส่หน้ากากอนามัยป้องกันไว้ก่อนเพื่อความปลอดภัย"
+    else:
+        pm25_instruction = f"ค่าฝุ่นอยู่ที่ {pm25} (ให้บอกความรู้สึกแบบบ้านๆ ไม่ต้องบอกตัวเลขเป๊ะๆ)"
     wl, bank_level = get_inburi_data()
     discharge      = fetch_chao_phraya_dam_discharge()
     hotspots       = get_hotspots()
@@ -759,7 +778,7 @@ if __name__ == "__main__":
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
     ข้อมูลดิบ: วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
-    - ฝุ่น PM 2.5: {pm25} (บอกความรู้สึกแบบบ้านๆ ไม่ต้องบอกตัวเลข)
+    - ฝุ่น PM 2.5: {pm25_instruction}
     - {watch_title}: {watch_data}
     - ระดับน้ำ: {wl_full_text}
     - ระบายเขื่อน: {discharge_full_text}
