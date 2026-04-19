@@ -555,46 +555,24 @@ def _weighted_pm25(rows):
 
 def get_accurate_pm25():
     """
-    ดึงค่า PM2.5 จาก 4 แหล่งพร้อมกัน พร้อม debug print ทุกขั้นตอน
-    ลำดับความน่าเชื่อถือ: Air4Thai (20 กม.) > GISTDA > WAQI > Open-Meteo > Air4Thai (50 กม.)
+    ดึงค่า PM2.5 จาก 5 แหล่งพร้อม debug print ทุกขั้นตอน
+    ลำดับความน่าเชื่อถือ:
+      [1] Air4Thai  ≤20 กม. อายุ ≤1 ชม.   (สถานีจริง PCD)
+      [2] GISTDA                            (ดาวเทียมพิกัดตรง)
+      [3] WAQI สถานีสิงห์บุรี               (A419585 / A419584 / geo ≤60 กม.)
+      [4] OpenWeatherMap                    (model ฟรี แม่นกว่า Open-Meteo)
+      [5] Open-Meteo                        (model สำรองสุดท้าย)
+      [6] Air4Thai  ≤50 กม. อายุ ≤1 ชม.   (ชัยนาท/อ่างทอง)
+      [7] Air4Thai  ≤50 กม. ข้อมูลเก่า     (ดีกว่า N/A)
     """
-    STRICT_KM = 20   # รัศมีหลัก
-    WIDE_KM   = 50   # รัศมี fallback (ชัยนาท/อ่างทอง/สุพรรณบุรี)
-    MAX_AGE   = 3600 # 1 ชม.
+    STRICT_KM = 20
+    WIDE_KM   = 50
+    MAX_AGE   = 3600  # 1 ชม.
     headers   = {'User-Agent': 'Mozilla/5.0'}
-    air4thai_rows, gistda_value, openmeteo_value, waqi_value = [], None, None, None
+    air4thai_rows                                       = []
+    gistda_value = waqi_value = owm_value = openmeteo_value = None
 
-    # ──────────────────────────────────────────────────────
-    # 1. Air4Thai (PCD) — สถานีภาคพื้นดินจริง
-    # ──────────────────────────────────────────────────────
-    try:
-        res = requests.get(
-            f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}",
-            headers=headers, timeout=15, verify=False)
-        print(f"Air4Thai HTTP: {res.status_code}")
-        if res.status_code == 200:
-            stations_in_range = []
-            for st in res.json().get('stations', []):
-                pm25_val = _safe_float(st.get('LastUpdate', {}).get('PM25', {}).get('value'))
-                if pm25_val is None: continue
-                lat = _safe_float(st.get('lat'))
-                lon = _safe_float(st.get('long'))
-                if lat is None or lon is None: continue
-                dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
-                if dist > WIDE_KM: continue
-                age  = _parse_air4thai_age_seconds(st) or (MAX_AGE + 1)
-                name = st.get('nameEN', st.get('nameTH', '?'))
-                stations_in_range.append((dist, name, pm25_val, age))
-                air4thai_rows.append({'source': 'air4thai', 'pm25': pm25_val,
-                                      'distance': dist, 'age': age, 'max_age': MAX_AGE})
-            stations_in_range.sort()
-            print(f"Air4Thai สถานีใน {WIDE_KM} กม.: {[(f'{d:.1f}km', n, v) for d,n,v,_ in stations_in_range[:5]]}")
-    except Exception as e:
-        print(f"⚠️ Air4Thai error: {e}")
-
-    # ──────────────────────────────────────────────────────
-    # 2. GISTDA — ดาวเทียมอิงพิกัดตรง
-    # ──────────────────────────────────────────────────────
+    # ── 1. GISTDA ────────────────────────────────────────
     try:
         res = requests.get(
             f"https://pm25.gistda.or.th/rest/getPM25byLocation"
@@ -609,42 +587,113 @@ def get_accurate_pm25():
     except Exception as e:
         print(f"⚠️ GISTDA error: {e}")
 
-    # ──────────────────────────────────────────────────────
-    # 3. WAQI (aqicn.org) — แหล่งใหม่ ครอบคลุมสถานี PCD ทั่วไทย
-    #    ต้องตั้ง env var: WAQI_TOKEN (ขอฟรีที่ https://aqicn.org/data-platform/token/)
-    # ──────────────────────────────────────────────────────
+    # ── 2. Air4Thai (PCD) — รัศมี 50 กม. ────────────────
+    try:
+        res = requests.get(
+            f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}",
+            headers=headers, timeout=15, verify=False)
+        print(f"Air4Thai HTTP: {res.status_code}")
+        if res.status_code == 200:
+            nearby = []
+            for st in res.json().get('stations', []):
+                pm25_val = _safe_float(st.get('LastUpdate', {}).get('PM25', {}).get('value'))
+                if pm25_val is None: continue
+                lat = _safe_float(st.get('lat'))
+                lon = _safe_float(st.get('long'))
+                if lat is None or lon is None: continue
+                dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
+                if dist > WIDE_KM: continue
+                age  = _parse_air4thai_age_seconds(st) or (MAX_AGE + 1)
+                name = st.get('nameEN', st.get('nameTH', '?'))
+                nearby.append((dist, name, pm25_val, age))
+                air4thai_rows.append({'source': 'air4thai', 'pm25': pm25_val,
+                                      'distance': dist, 'age': age, 'max_age': MAX_AGE})
+            nearby.sort()
+            print(f"Air4Thai สถานีใน {WIDE_KM} กม.: "
+                  f"{[(f'{d:.1f}km', n, v) for d,n,v,_ in nearby[:5]]}")
+    except Exception as e:
+        print(f"⚠️ Air4Thai error: {e}")
+
+    # ── 3. WAQI — สถานีสิงห์บุรีโดยตรง ──────────────────
+    #   A419585 = อบต.โพกรวม กอ.รมน.สิงห์บุรี (~10 กม.)
+    #   A419584 = อบจ.สิงห์บุรี (~15 กม.)
     WAQI_TOKEN = os.environ.get("WAQI_TOKEN")
     if WAQI_TOKEN:
-        try:
-            # geo: ดึงสถานีที่ใกล้ lat/lon ที่สุด
-            res = requests.get(
-                f"https://api.waqi.info/feed/geo:{INBURI_LAT};{INBURI_LON}/?token={WAQI_TOKEN}",
-                timeout=15)
-            print(f"WAQI HTTP: {res.status_code}")
-            if res.status_code == 200:
-                d = res.json()
-                print(f"WAQI status: {d.get('status')} | station: {d.get('data',{}).get('city',{}).get('name','?')}")
-                if d.get('status') == 'ok':
-                    iaqi = d['data'].get('iaqi', {})
-                    pm   = _safe_float((iaqi.get('pm25') or {}).get('v'))
-                    print(f"WAQI PM2.5: {pm}")
-                    if pm is not None: waqi_value = pm
-        except Exception as e:
-            print(f"⚠️ WAQI error: {e}")
-    else:
-        print("⚠️ WAQI_TOKEN ไม่พบ — ข้าม (ขอ token ฟรีที่ https://aqicn.org/data-platform/token/)")
+        for sid in ["419585", "419584"]:   # station numeric ID (ไม่มี A นำหน้า)
+            try:
+                res = requests.get(
+                    f"https://api.waqi.info/feed/@{sid}/?token={WAQI_TOKEN}",
+                    timeout=15)
+                print(f"WAQI @{sid} HTTP: {res.status_code}")
+                if res.status_code == 200:
+                    d = res.json()
+                    if d.get('status') == 'ok':
+                        iaqi  = d['data'].get('iaqi', {})
+                        pm    = _safe_float((iaqi.get('pm25') or {}).get('v'))
+                        sname = d['data'].get('city', {}).get('name', sid)
+                        print(f"WAQI @{sid} ({sname}) PM2.5: {pm}")
+                        if pm is not None:
+                            waqi_value = pm
+                            break
+            except Exception as e:
+                print(f"⚠️ WAQI @{sid} error: {e}")
 
-    # ──────────────────────────────────────────────────────
-    # 4. Open-Meteo — model forecast (สำรอง)
-    # ──────────────────────────────────────────────────────
+        if waqi_value is None:   # geo fallback พร้อมตรวจระยะ
+            try:
+                res = requests.get(
+                    f"https://api.waqi.info/feed/geo:{INBURI_LAT};{INBURI_LON}/"
+                    f"?token={WAQI_TOKEN}",
+                    timeout=15)
+                print(f"WAQI geo HTTP: {res.status_code}")
+                if res.status_code == 200:
+                    d    = res.json()
+                    if d.get('status') == 'ok':
+                        geo   = d['data'].get('city', {}).get('geo', [])
+                        sname = d['data'].get('city', {}).get('name', '?')
+                        if len(geo) == 2:
+                            dist = get_dist(INBURI_LAT, INBURI_LON,
+                                            float(geo[0]), float(geo[1]))
+                            print(f"WAQI geo: {sname} ห่าง {dist:.1f} กม.")
+                            if dist <= 60:
+                                iaqi = d['data'].get('iaqi', {})
+                                pm   = _safe_float((iaqi.get('pm25') or {}).get('v'))
+                                print(f"WAQI geo PM2.5: {pm}")
+                                if pm is not None: waqi_value = pm
+                            else:
+                                print(f"⚠️ WAQI geo: ไกลเกิน ({dist:.1f} กม.) ข้าม")
+            except Exception as e:
+                print(f"⚠️ WAQI geo error: {e}")
+    else:
+        print("⚠️ WAQI_TOKEN ไม่พบ")
+
+    # ── 4. OpenWeatherMap Air Pollution API ───────────────
+    OWM_API_KEY = os.environ.get("OWM_API_KEY")
+    if OWM_API_KEY:
+        try:
+            res = requests.get(
+                f"http://api.openweathermap.org/data/2.5/air_pollution"
+                f"?lat={INBURI_LAT}&lon={INBURI_LON}&appid={OWM_API_KEY}",
+                timeout=15)
+            print(f"OWM HTTP: {res.status_code}")
+            if res.status_code == 200:
+                comp = res.json()['list'][0]['components']
+                pm   = _safe_float(comp.get('pm2_5'))
+                print(f"OWM PM2.5: {pm}")
+                if pm is not None: owm_value = pm
+        except Exception as e:
+            print(f"⚠️ OWM error: {e}")
+    else:
+        print("⚠️ OWM_API_KEY ไม่พบ")
+
+    # ── 5. Open-Meteo ─────────────────────────────────────
     try:
         res = requests.get(
             f"https://air-quality-api.open-meteo.com/v1/air-quality"
-            f"?latitude={INBURI_LAT}&longitude={INBURI_LON}&current=pm2_5&timezone=Asia%2FBangkok",
+            f"?latitude={INBURI_LAT}&longitude={INBURI_LON}"
+            f"&current=pm2_5&timezone=Asia%2FBangkok",
             headers=headers, timeout=20)
         res.raise_for_status()
         data = res.json()
-        print(f"Open-Meteo air-quality HTTP: 200")
         if 'current' in data:
             pm = _safe_float(data['current'].get('pm2_5'))
             print(f"Open-Meteo PM2.5: {pm}")
@@ -652,50 +701,55 @@ def get_accurate_pm25():
     except Exception as e:
         print(f"⚠️ Open-Meteo error: {e}")
 
-    # ──────────────────────────────────────────────────────
-    # Decision Logic — เรียงตามความน่าเชื่อถือ
-    # ──────────────────────────────────────────────────────
+    # ── Decision Logic ────────────────────────────────────
 
-    # [1] Air4Thai ในรัศมี 20 กม. ข้อมูลอายุไม่เกิน 1 ชม. (ดีที่สุด)
-    strict = [r for r in air4thai_rows if r['distance'] <= STRICT_KM and r['age'] <= MAX_AGE]
+    # [1] Air4Thai ≤20 กม. อายุ ≤1 ชม.
+    strict = [r for r in air4thai_rows
+              if r['distance'] <= STRICT_KM and r['age'] <= MAX_AGE]
     if strict:
         strict.sort(key=lambda x: (x['distance'], x['age']))
         pm = _weighted_pm25(strict[:3])
         if pm is not None:
-            print(f"✅ ใช้ Air4Thai (strict 20 กม.): {pm:.1f}")
+            print(f"✅ ใช้ Air4Thai strict 20 กม.: {pm:.1f}")
             return f"{pm:.1f}"
 
-    # [2] GISTDA ดาวเทียม
+    # [2] GISTDA
     if gistda_value is not None:
         print(f"✅ ใช้ GISTDA: {gistda_value:.1f}")
         return f"{gistda_value:.1f}"
 
-    # [3] WAQI สถานีใกล้สุด
+    # [3] WAQI สิงห์บุรี
     if waqi_value is not None:
         print(f"✅ ใช้ WAQI: {waqi_value:.1f}")
         return f"{waqi_value:.1f}"
 
-    # [4] Open-Meteo model
+    # [4] OpenWeatherMap
+    if owm_value is not None:
+        print(f"✅ ใช้ OWM: {owm_value:.1f}")
+        return f"{owm_value:.1f}"
+
+    # [5] Open-Meteo
     if openmeteo_value is not None:
         print(f"✅ ใช้ Open-Meteo: {openmeteo_value:.1f}")
         return f"{openmeteo_value:.1f}"
 
-    # [5] Air4Thai ขยายรัศมี 50 กม. (ชัยนาท/อ่างทอง/สุพรรณบุรี) — ดีกว่า N/A
-    wide = [r for r in air4thai_rows if r['distance'] <= WIDE_KM and r['age'] <= MAX_AGE]
+    # [6] Air4Thai ≤50 กม. อายุ ≤1 ชม.
+    wide = [r for r in air4thai_rows
+            if r['distance'] <= WIDE_KM and r['age'] <= MAX_AGE]
     if wide:
         wide.sort(key=lambda x: (x['distance'], x['age']))
         pm = _weighted_pm25(wide[:3])
         if pm is not None:
-            print(f"✅ ใช้ Air4Thai (fallback 50 กม.): {pm:.1f}")
+            print(f"✅ ใช้ Air4Thai fallback 50 กม.: {pm:.1f}")
             return f"{pm:.1f}"
 
-    # [6] Air4Thai ทุกสถานีในรัศมี 50 กม. ไม่ว่าจะเก่าแค่ไหน (ดีกว่า N/A)
+    # [7] Air4Thai ≤50 กม. ข้อมูลเก่า (ดีกว่า N/A)
     stale = [r for r in air4thai_rows if r['distance'] <= WIDE_KM]
     if stale:
         stale.sort(key=lambda x: (x['age'], x['distance']))
         pm = _weighted_pm25(stale[:3])
         if pm is not None:
-            print(f"⚠️ ใช้ Air4Thai (stale data): {pm:.1f}")
+            print(f"⚠️ ใช้ Air4Thai stale: {pm:.1f}")
             return f"{pm:.1f}"
 
     print("❌ ทุกแหล่งล้มเหลว → N/A")
