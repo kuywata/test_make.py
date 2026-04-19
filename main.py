@@ -27,6 +27,151 @@ thai_year = now.year + 543
 date_str = f"{now.day} {thai_month} {thai_year}"
 time_str = now.strftime("%H:%M น.")
 
+# ─────────────────────────────────────────────
+# ฟังก์ชันจัดการ State (ไม่กระทบส่วนดึงข้อมูลใดๆ)
+# ─────────────────────────────────────────────
+STATE_FILE = "state.json"
+
+def load_state() -> dict:
+    """โหลด state จาก state.json — ถ้าไฟล์ไม่มีหรือเสียหาย คืน dict ว่าง"""
+    try:
+        with open(STATE_FILE, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_state(state: dict):
+    """บันทึก state ลง state.json — ไม่ raise exception เพื่อไม่ให้กระทบ flow หลัก"""
+    try:
+        with open(STATE_FILE, 'w', encoding='utf-8') as f:
+            json.dump(state, f, ensure_ascii=False, indent=2)
+    except Exception as e:
+        print(f"⚠️ บันทึก state ไม่ได้: {e}")
+
+def build_compare_text(current, previous, unit: str, label: str) -> str:
+    """สร้างข้อความเปรียบเทียบค่าปัจจุบันกับเมื่อวาน"""
+    if previous is None or current is None:
+        return ""
+    try:
+        delta = round(float(current) - float(previous), 2)
+        prev_str = f"{float(previous):.2f}".rstrip('0').rstrip('.')
+        if delta > 0:
+            return f"⬆️ เพิ่มขึ้น {abs(delta):.2f} {unit} จากเมื่อวาน ({prev_str} {unit})"
+        elif delta < 0:
+            return f"⬇️ ลดลง {abs(delta):.2f} {unit} จากเมื่อวาน ({prev_str} {unit})"
+        else:
+            return f"➡️ ทรงตัว เท่ากับเมื่อวาน ({prev_str} {unit})"
+    except Exception:
+        return ""
+
+# ─────────────────────────────────────────────
+# ฟังก์ชันพยากรณ์ฝน/พายุ (ใช้ API Key เดิมของ Tomorrow.io)
+# ─────────────────────────────────────────────
+def get_rain_storm_forecast() -> dict:
+    """
+    ดึงพยากรณ์ฝนและพายุ 24 ชั่วโมงจาก Tomorrow.io
+    ใช้ API Key เดิม ไม่กระทบ get_weather() เลย
+    คืนค่า dict: { max_rain_prob, storm_hours, heavy_rain_hours, summary }
+    """
+    TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
+    if not TOMORROW_API_KEY:
+        return {}
+    try:
+        url = (
+            f"https://api.tomorrow.io/v4/weather/forecast"
+            f"?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
+        )
+        res = requests.get(url, timeout=10)
+        if res.status_code != 200:
+            return {}
+        data = res.json()
+        hourly = data['timelines']['hourly'][:24]
+
+        storm_slots = []
+        heavy_rain_slots = []
+
+        for h in hourly:
+            v = h.get('values', {})
+            rain_prob  = float(v.get('precipitationProbability', 0) or 0)
+            thunder    = float(v.get('thunderstormProbability',  0) or 0)
+            wind_spd   = float(v.get('windSpeed',                0) or 0)
+
+            # แปลงเวลาเป็น Asia/Bangkok
+            try:
+                dt = datetime.fromisoformat(
+                    h['time'].replace('Z', '+00:00')
+                ).astimezone(tz)
+                hour_label = dt.strftime("%H:%M")
+            except Exception:
+                hour_label = "?"
+
+            # เกณฑ์พายุ: โอกาสฝน ≥ 60% AND (ฟ้าคะนอง ≥ 30% OR ลม ≥ 10 m/s)
+            if rain_prob >= 60 and (thunder >= 30 or wind_spd >= 10):
+                storm_slots.append({
+                    'time': hour_label,
+                    'rain_prob': rain_prob,
+                    'thunder': thunder,
+                    'wind': wind_spd,
+                })
+            # เกณฑ์ฝนหนัก: โอกาสฝน ≥ 60% (ไม่ถึงระดับพายุ)
+            elif rain_prob >= 60:
+                heavy_rain_slots.append({
+                    'time': hour_label,
+                    'rain_prob': rain_prob,
+                })
+
+        max_rain_prob  = max(
+            (float(h['values'].get('precipitationProbability', 0) or 0) for h in hourly),
+            default=0
+        )
+        max_thunder    = max(
+            (float(h['values'].get('thunderstormProbability',  0) or 0) for h in hourly),
+            default=0
+        )
+
+        # สร้างข้อความสรุปพยากรณ์
+        if storm_slots:
+            s = storm_slots[0]
+            times = ", ".join(x['time'] for x in storm_slots[:3])
+            summary = (
+                f"⚠️ เสี่ยงพายุฝนฟ้าคะนอง ช่วงเวลา {times} น. "
+                f"โอกาสฝน {s['rain_prob']:.0f}% ลม {s['wind']:.1f} m/s "
+                f"ฟ้าคะนอง {s['thunder']:.0f}%"
+            )
+        elif heavy_rain_slots:
+            times = ", ".join(x['time'] for x in heavy_rain_slots[:3])
+            prob  = heavy_rain_slots[0]['rain_prob']
+            summary = (
+                f"มีโอกาสฝนตกหนัก ช่วงเวลา {times} น. "
+                f"โอกาสฝน {prob:.0f}% (ยังไม่ถึงระดับพายุ)"
+            )
+        elif max_rain_prob >= 30:
+            summary = (
+                f"อาจมีฝนประปราย โอกาสฝนสูงสุด {max_rain_prob:.0f}% "
+                f"ไม่มีพายุใน 24 ชั่วโมงข้างหน้า"
+            )
+        else:
+            summary = (
+                f"ท้องฟ้าโปร่งดี โอกาสฝนต่ำมาก ({max_rain_prob:.0f}%) "
+                f"ไม่มีพายุในพื้นที่อินทร์บุรี"
+            )
+
+        return {
+            'max_rain_prob': max_rain_prob,
+            'max_thunder': max_thunder,
+            'storm_slots': storm_slots,
+            'heavy_rain_slots': heavy_rain_slots,
+            'summary': summary,
+        }
+
+    except Exception as e:
+        print(f"⚠️ ดึงพยากรณ์ฝน/พายุไม่ได้: {e}")
+        return {}
+
+
+# ─────────────────────────────────────────────
+# ฟังก์ชันเดิม — ไม่แตะเลย
+# ─────────────────────────────────────────────
 def get_dist(lat1, lon1, lat2, lon2):
     R = 6371
     dlat = math.radians(float(lat2) - float(lat1))
@@ -327,15 +472,40 @@ def fetch_chao_phraya_dam_discharge():
         print(f"⚠️ เขื่อน error: {e}")
     return None
 
+
+# ─────────────────────────────────────────────
+# Main
+# ─────────────────────────────────────────────
 if __name__ == "__main__":
     print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี + พลังดาวเทียม ===")
-    
+
+    # 1. โหลด state เดิม (ค่าของวันก่อน)
+    state = load_state()
+    prev_wl       = state.get("last_water_level")
+    prev_discharge = state.get("last_discharge")
+
+    # 2. ดึงข้อมูลทั้งหมด — เหมือนเดิมทุกบรรทัด
     temp, _, rain_prob, humidity, wind, uv = get_weather() 
-    pm25 = get_accurate_pm25()
+    pm25     = get_accurate_pm25()
     wl, bank_level = get_inburi_data()
     discharge = fetch_chao_phraya_dam_discharge()
-    hotspots = get_hotspots()
-    
+    hotspots  = get_hotspots()
+
+    # 3. สร้างข้อความเปรียบเทียบระดับน้ำและเขื่อน
+    wl_compare_text       = build_compare_text(wl,       prev_wl,       "ม.", "ระดับน้ำ")
+    discharge_compare_text = build_compare_text(discharge, prev_discharge, "ลบ.ม./วินาที", "การระบาย")
+
+    # 4. บันทึกค่าปัจจุบันลง state (เฉพาะค่าที่ดึงได้จริง)
+    new_state = dict(state)
+    if wl is not None:
+        new_state["last_water_level"] = float(wl)
+    if discharge is not None:
+        new_state["last_discharge"] = float(discharge)
+    save_state(new_state)
+
+    # ──────────────────────────────────────────
+    # 5. สร้าง text ส่วนต่างๆ (เหมือนเดิม)
+    # ──────────────────────────────────────────
     if wl is not None:
         diff = round(bank_level - wl, 2)
         if diff < 0:
@@ -353,29 +523,59 @@ if __name__ == "__main__":
     else:
         hotspot_text = f"ตรวจพบ {hotspots} จุด (เฝ้าระวังควันจากการเผาไร่/นา)"
 
-    # ล้างข้อความ cite ส่วนเกินและจัดย่อหน้าให้เป๊ะ
+    # ──────────────────────────────────────────
+    # 6. เลือกหัวข้อเฝ้าระวัง: ความร้อน vs ฝน/พายุ
+    # ──────────────────────────────────────────
+    if hotspots not in (0, "N/A") and hotspots:
+        # มีจุดเผา → ใช้หัวข้อความร้อนตามเดิม
+        watch_icon    = "🔥"
+        watch_title   = "เฝ้าระวังความร้อน"
+        watch_data    = hotspot_text
+        watch_rule    = (
+            "สรุปเรื่องจุดเผาไร่นาตามข้อมูล "
+            "ห้ามพูดว่าไฟป่าเด็ดขาด บอกเป็น 'ควันจากการเผาไร่/นา'"
+        )
+    else:
+        # ไม่มีจุดเผา → เปลี่ยนเป็นเฝ้าระวังฝน/พายุ
+        watch_icon  = "🌧️"
+        watch_title = "เฝ้าระวังฝนและพายุ"
+        rain_fc     = get_rain_storm_forecast()
+        watch_data  = rain_fc.get('summary', f"โอกาสฝน {rain_prob}% (ดึงพยากรณ์ละเอียดไม่ได้)")
+        watch_rule  = (
+            "สรุปพยากรณ์ฝน/พายุจากข้อมูลที่ให้ไว้อย่างตรงไปตรงมา "
+            "ถ้ามีความเสี่ยงให้เตือน ถ้าไม่มีให้บอกว่าสบายใจได้ "
+            "ห้ามกุเรื่องหรือเพิ่มระดับความรุนแรงเกินข้อมูลจริง"
+        )
+
+    # ──────────────────────────────────────────
+    # 7. สร้าง prompt — โครงสร้างเดิมทุกอย่าง เพิ่มแค่ข้อมูลเปรียบเทียบ
+    # ──────────────────────────────────────────
+    wl_full_text       = wl_text + (f"\n    (เทียบเมื่อวาน: {wl_compare_text})" if wl_compare_text else "")
+    discharge_full_text = discharge_text + (f"\n    (เทียบเมื่อวาน: {discharge_compare_text})" if discharge_compare_text else "")
+
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
     ข้อมูลดิบ: {date_str} {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
     - ฝุ่น PM 2.5: {pm25} (บอกความรู้สึกแบบบ้านๆ ไม่ต้องบอกตัวเลข)
-    - จุดความร้อน (VIIRS): {hotspot_text}
-    - ระดับน้ำ: {wl_text}
-    - ระบายเขื่อน: {discharge_text}
+    - {watch_title}: {watch_data}
+    - ระดับน้ำ: {wl_full_text}
+    - ระบายเขื่อน: {discharge_full_text}
 
     กฎการเขียน:
-    1. จุดความร้อน: ถ้าพบ ให้เตือนเรื่อง 'ควันจากการเผาไร่/นา' ห้ามพูดว่าไฟป่าเด็ดขาด
+    1. {watch_title}: {watch_rule}
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. ให้เปลี่ยนเป็น 'เมตร')
     3. ความไม่จำเจ: ให้ใส่ 'อารมณ์ขัน' หรือ 'การทักทายตามวัน' ลงไปในสรุป
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
+    5. ระดับน้ำและเขื่อน: ถ้ามีข้อมูลเปรียบเทียบกับเมื่อวาน ให้พูดถึงแนวโน้มแบบเป็นธรรมชาติ (เพิ่ม/ลด/ทรงตัว) ไม่ต้องพูดตัวเลขซ้ำ
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
     
     🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
-    🔥 **เฝ้าระวังความร้อน:** [สรุปเรื่องจุดเผาไร่นาตามข้อมูล]
-    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำเป็นเมตรแบบเข้าใจง่าย]
-    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ]
+    {watch_icon} **{watch_title}:** [{watch_rule}]
+    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำเป็นเมตรแบบเข้าใจง่าย พร้อมแนวโน้มเปรียบกับเมื่อวานถ้ามีข้อมูล]
+    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ พร้อมแนวโน้มเปรียบกับเมื่อวานถ้ามีข้อมูล]
 
     📌 **สรุป:** [ใส่ความจำเจ/อารมณ์ขัน/ทักทายตามวัน 1-2 บรรทัด]
     """
