@@ -88,9 +88,9 @@ def get_dist(lat1, lon1, lat2, lon2):
 def get_tmd_observation() -> dict:
     """
     ดึงข้อมูลตรวจวัดจริงจากสถานีอุตุฯ ใกล้อินทร์บุรี/สิงห์บุรี
-    - ลอง radius 35 กม. ก่อน (ครอบคลุมสิงห์บุรี-อินทร์บุรี)
-    - ถ้าไม่ได้ขยายเป็น 80 กม. (fallback)
-    - ใช้ weighted average จากหลายสถานีแทนเลือกแค่ 1
+    - ตรวจ response body ก่อน parse JSON เสมอ (ป้องกัน empty body จาก TMD)
+    - ลอง radius 35 กม. ก่อน (สิงห์บุรี-อินทร์บุรี) fallback 80 กม.
+    - weighted average จาก 3 สถานีใกล้สุด + ใช้ค่าฝนสูงสุดเพื่อไม่ underestimate
     คืนค่า: { available, rain_3h, temp, humidity, wind_speed, station_name, dist_km }
     """
     result = {'available': False}
@@ -107,7 +107,18 @@ def get_tmd_observation() -> dict:
         if res.status_code != 200:
             return result
 
-        data     = res.json()
+        # ── guard: ตรวจ body ก่อน parse ──────────────────────────────────
+        raw = res.text.strip()
+        if not raw:
+            print("⚠️ TMD Obs: response body ว่างเปล่า")
+            return result
+        try:
+            data = res.json()
+        except Exception as je:
+            print(f"⚠️ TMD Obs: JSON parse error ({je}) | body[:120]={raw[:120]!r}")
+            return result
+        # ─────────────────────────────────────────────────────────────────
+
         stations = data.get('Stations', {}).get('Station', [])
 
         def parse_candidates(max_dist_km):
@@ -135,36 +146,35 @@ def get_tmd_observation() -> dict:
                     continue
             return cands
 
-        # ลอง radius 35 กม. ก่อน (สิงห์บุรี+อินทร์บุรี)
+        # ลอง 35 กม. (สิงห์บุรี-อินทร์บุรี) ก่อน
         candidates = parse_candidates(35)
         used_radius = 35
         if not candidates:
-            # fallback ขยาย 80 กม.
             candidates = parse_candidates(80)
             used_radius = 80
-            print(f"⚠️ TMD Obs: ไม่พบสถานีใน 35 กม. ขยายเป็น 80 กม.")
+            print("⚠️ TMD Obs: ไม่พบสถานีใน 35 กม. ขยายเป็น 80 กม.")
 
         if not candidates:
             print("⚠️ TMD Obs: ไม่พบสถานีในรัศมีใดเลย")
             return result
 
         candidates.sort(key=lambda x: x['dist'])
-
-        # weighted average จาก 3 สถานีใกล้สุด (น้ำหนัก 1/dist²)
         top3 = candidates[:3]
-        total_w = sum(1.0 / (c['dist'] ** 2) for c in top3)
+
+        # weighted average (น้ำหนัก 1/dist²)
+        total_w = sum(1.0 / max(c['dist'], 0.1) ** 2 for c in top3)
         if total_w > 0:
-            w_rain = sum(c['rain_3h'] * (1.0 / (c['dist'] ** 2)) for c in top3) / total_w
-            w_temp = sum(c['temp']    * (1.0 / (c['dist'] ** 2)) for c in top3) / total_w
-            w_hum  = sum(c['humidity']* (1.0 / (c['dist'] ** 2)) for c in top3) / total_w
-            w_wind = sum(c['wind_speed']*(1.0/(c['dist']**2)) for c in top3) / total_w
+            w_rain = sum(c['rain_3h']    * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
+            w_temp = sum(c['temp']       * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
+            w_hum  = sum(c['humidity']   * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
+            w_wind = sum(c['wind_speed'] * (1.0 / max(c['dist'], 0.1) ** 2) for c in top3) / total_w
         else:
             best   = top3[0]
             w_rain, w_temp, w_hum, w_wind = (best['rain_3h'], best['temp'],
                                               best['humidity'], best['wind_speed'])
 
-        best = candidates[0]  # สถานีใกล้สุดสำหรับ label
-        # ใช้ฝนสูงสุดของสถานีใกล้สุด เพื่อไม่ให้ค่าเฉลี่ยทำให้ underestimate
+        best = candidates[0]
+        # ใช้ค่าฝนสูงสุดระหว่าง weighted avg กับสถานีใกล้สุด (ไม่ underestimate)
         rain_report = max(w_rain, best['rain_3h'])
 
         result.update({
@@ -180,7 +190,7 @@ def get_tmd_observation() -> dict:
         })
         print(f"✅ TMD Obs ({len(top3)} สถานี, r={used_radius}กม.): "
               f"ใกล้สุด={best['name']} {best['dist']:.1f}กม. "
-              f"ฝน(max/avg)={rain_report:.2f}/{w_rain:.2f}มม.")
+              f"ฝน={rain_report:.2f}มม.")
     except Exception as e:
         print(f"⚠️ TMD Observation error: {e}")
     return result
@@ -222,7 +232,17 @@ def get_tmd_nwp_forecast() -> dict:
             if res.status_code != 200:
                 return result
 
-        data = res.json()
+        # ── guard: ตรวจ body ก่อน parse ──────────────────────────────────
+        raw = res.text.strip()
+        if not raw:
+            print("⚠️ TMD NWP: response body ว่างเปล่า")
+            return result
+        try:
+            data = res.json()
+        except Exception as je:
+            print(f"⚠️ TMD NWP: JSON parse error ({je}) | body[:120]={raw[:120]!r}")
+            return result
+        # ─────────────────────────────────────────────────────────────────
 
         # รองรับ response หลายรูปแบบ
         wf_list = data.get('WeatherForecasts', [])
@@ -234,7 +254,7 @@ def get_tmd_nwp_forecast() -> dict:
         )
 
         if not forecasts:
-            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์ (response keys:", list(data.keys()), ")")
+            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์ (keys:", list(data.keys()), ")")
             return result
 
         next_6h = forecasts[:6]
@@ -457,7 +477,6 @@ def get_comprehensive_rain_info() -> dict:
     # ── ระดับความเสี่ยงรวม ────────────────────
     nwp_rain    = tmd_nwp.get('rain_1h_max', 0) or 0
     nwp_thunder = tmd_nwp.get('thunder_max', 0) or 0
-    # ใช้ฝนสูงสุดจากทุกแหล่ง (TMD obs ครอบคลุม 3 ชม., actual ครอบคลุม 1 ชม.)
     obs_rain_3h = tmd_obs.get('rain_3h', 0) or 0
     has_danger  = (bool(tmr.get('danger_slots')) or nwp_rain >= 35
                    or (nwp_rain >= 20 and nwp_thunder >= 50)
