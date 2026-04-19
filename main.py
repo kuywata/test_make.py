@@ -15,25 +15,30 @@ from playwright.sync_api import sync_playwright
 from requests.packages.urllib3.exceptions import InsecureRequestWarning
 requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
+TMD_API_KEY = os.environ.get("TMD_API_KEY")
+
 client = genai.Client(api_key=GEMINI_API_KEY)
 
 tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
-THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน", "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
+THAI_MONTHS = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+               "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
 thai_month = THAI_MONTHS[now.month - 1]
-thai_year = now.year + 543
-date_str = f"{now.day} {thai_month} {thai_year}"
-time_str = now.strftime("%H:%M น.")
+thai_year  = now.year + 543
+date_str   = f"{now.day} {thai_month} {thai_year}"
+time_str   = now.strftime("%H:%M น.")
+
+INBURI_LAT = 14.9961
+INBURI_LON = 100.3253
 
 # ─────────────────────────────────────────────
-# ฟังก์ชันจัดการ State (ไม่กระทบส่วนดึงข้อมูลใดๆ)
+# State
 # ─────────────────────────────────────────────
 STATE_FILE = "state.json"
 
 def load_state() -> dict:
-    """โหลด state จาก state.json — ถ้าไฟล์ไม่มีหรือเสียหาย คืน dict ว่าง"""
     try:
         with open(STATE_FILE, 'r', encoding='utf-8') as f:
             return json.load(f)
@@ -41,7 +46,6 @@ def load_state() -> dict:
         return {}
 
 def save_state(state: dict):
-    """บันทึก state ลง state.json — ไม่ raise exception เพื่อไม่ให้กระทบ flow หลัก"""
     try:
         with open(STATE_FILE, 'w', encoding='utf-8') as f:
             json.dump(state, f, ensure_ascii=False, indent=2)
@@ -49,7 +53,6 @@ def save_state(state: dict):
         print(f"⚠️ บันทึก state ไม่ได้: {e}")
 
 def build_compare_text(current, previous, unit: str, label: str) -> str:
-    """สร้างข้อความเปรียบเทียบค่าปัจจุบันกับเมื่อวาน"""
     if previous is None or current is None:
         return ""
     try:
@@ -65,165 +68,446 @@ def build_compare_text(current, previous, unit: str, label: str) -> str:
         return ""
 
 # ─────────────────────────────────────────────
-# ฟังก์ชันพยากรณ์ฝน/พายุ (ใช้ API Key เดิมของ Tomorrow.io)
-# ─────────────────────────────────────────────
-def get_rain_storm_forecast() -> dict:
-    """
-    ดึงพยากรณ์ฝนและพายุ 24 ชั่วโมงจาก Tomorrow.io
-    ใช้ API Key เดิม ไม่กระทบ get_weather() เลย
-    คืนค่า dict: { max_rain_prob, storm_hours, heavy_rain_hours, summary }
-    """
-    TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
-    if not TOMORROW_API_KEY:
-        return {}
-    try:
-        url = (
-            f"https://api.tomorrow.io/v4/weather/forecast"
-            f"?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-        )
-        res = requests.get(url, timeout=10)
-        if res.status_code != 200:
-            return {}
-        data = res.json()
-        hourly = data['timelines']['hourly'][:24]
-
-        storm_slots = []
-        heavy_rain_slots = []
-
-        for h in hourly:
-            v = h.get('values', {})
-            rain_prob  = float(v.get('precipitationProbability', 0) or 0)
-            thunder    = float(v.get('thunderstormProbability',  0) or 0)
-            wind_spd   = float(v.get('windSpeed',                0) or 0)
-
-            # แปลงเวลาเป็น Asia/Bangkok
-            try:
-                dt = datetime.fromisoformat(
-                    h['time'].replace('Z', '+00:00')
-                ).astimezone(tz)
-                hour_label = dt.strftime("%H:%M")
-            except Exception:
-                hour_label = "?"
-
-            # เกณฑ์พายุ: โอกาสฝน ≥ 60% AND (ฟ้าคะนอง ≥ 30% OR ลม ≥ 10 m/s)
-            if rain_prob >= 60 and (thunder >= 30 or wind_spd >= 10):
-                storm_slots.append({
-                    'time': hour_label,
-                    'rain_prob': rain_prob,
-                    'thunder': thunder,
-                    'wind': wind_spd,
-                })
-            # เกณฑ์ฝนหนัก: โอกาสฝน ≥ 60% (ไม่ถึงระดับพายุ)
-            elif rain_prob >= 60:
-                heavy_rain_slots.append({
-                    'time': hour_label,
-                    'rain_prob': rain_prob,
-                })
-
-        max_rain_prob  = max(
-            (float(h['values'].get('precipitationProbability', 0) or 0) for h in hourly),
-            default=0
-        )
-        max_thunder    = max(
-            (float(h['values'].get('thunderstormProbability',  0) or 0) for h in hourly),
-            default=0
-        )
-
-        # สร้างข้อความสรุปพยากรณ์
-        if storm_slots:
-            s = storm_slots[0]
-            times = ", ".join(x['time'] for x in storm_slots[:3])
-            summary = (
-                f"⚠️ เสี่ยงพายุฝนฟ้าคะนอง ช่วงเวลา {times} น. "
-                f"โอกาสฝน {s['rain_prob']:.0f}% ลม {s['wind']:.1f} m/s "
-                f"ฟ้าคะนอง {s['thunder']:.0f}%"
-            )
-        elif heavy_rain_slots:
-            times = ", ".join(x['time'] for x in heavy_rain_slots[:3])
-            prob  = heavy_rain_slots[0]['rain_prob']
-            summary = (
-                f"มีโอกาสฝนตกหนัก ช่วงเวลา {times} น. "
-                f"โอกาสฝน {prob:.0f}% (ยังไม่ถึงระดับพายุ)"
-            )
-        elif max_rain_prob >= 30:
-            summary = (
-                f"อาจมีฝนประปราย โอกาสฝนสูงสุด {max_rain_prob:.0f}% "
-                f"ไม่มีพายุใน 24 ชั่วโมงข้างหน้า"
-            )
-        else:
-            summary = (
-                f"ท้องฟ้าโปร่งดี โอกาสฝนต่ำมาก ({max_rain_prob:.0f}%) "
-                f"ไม่มีพายุในพื้นที่อินทร์บุรี"
-            )
-
-        return {
-            'max_rain_prob': max_rain_prob,
-            'max_thunder': max_thunder,
-            'storm_slots': storm_slots,
-            'heavy_rain_slots': heavy_rain_slots,
-            'summary': summary,
-        }
-
-    except Exception as e:
-        print(f"⚠️ ดึงพยากรณ์ฝน/พายุไม่ได้: {e}")
-        return {}
-
-
-# ─────────────────────────────────────────────
-# ฟังก์ชันเดิม — ไม่แตะเลย
+# ฟังก์ชันระยะทาง (เดิม)
 # ─────────────────────────────────────────────
 def get_dist(lat1, lon1, lat2, lon2):
     R = 6371
     dlat = math.radians(float(lat2) - float(lat1))
     dlon = math.radians(float(lon2) - float(lon1))
-    a = math.sin(dlat/2)**2 + math.cos(math.radians(float(lat1))) * math.cos(math.radians(float(lat2))) * math.sin(dlon/2)**2
-    c = 2 * math.asin(math.sqrt(a))
-    return R * c
+    a = (math.sin(dlat/2)**2
+         + math.cos(math.radians(float(lat1)))
+         * math.cos(math.radians(float(lat2)))
+         * math.sin(dlon/2)**2)
+    return R * 2 * math.asin(math.sqrt(a))
 
+# ─────────────────────────────────────────────
+# TMD ชุดที่ 1: ผลตรวจวัดและพยากรณ์อากาศ (Observation)
+# endpoint: https://data.tmd.go.th/api/Weather3Hours/v2/
+# ข้อมูลจริงจากสถานีตรวจอากาศทุก 3 ชั่วโมง
+# ─────────────────────────────────────────────
+def get_tmd_observation() -> dict:
+    """
+    ดึงข้อมูลตรวจวัดจริงจากสถานีอุตุฯ ใกล้อินทร์บุรี/สิงห์บุรี
+    - ลอง radius 35 กม. ก่อน (ครอบคลุมสิงห์บุรี-อินทร์บุรี)
+    - ถ้าไม่ได้ขยายเป็น 80 กม. (fallback)
+    - ใช้ weighted average จากหลายสถานีแทนเลือกแค่ 1
+    คืนค่า: { available, rain_3h, temp, humidity, wind_speed, station_name, dist_km }
+    """
+    result = {'available': False}
+    if not TMD_API_KEY:
+        print("⚠️ TMD_API_KEY ไม่พบ")
+        return result
+    try:
+        url = (
+            "https://data.tmd.go.th/api/Weather3Hours/v2/"
+            f"?domain=string&APIkey={TMD_API_KEY}&station_type=ตรวจอากาศผิวพื้น"
+        )
+        res = requests.get(url, timeout=15)
+        print(f"TMD Observation HTTP: {res.status_code}")
+        if res.status_code != 200:
+            return result
+
+        data     = res.json()
+        stations = data.get('Stations', {}).get('Station', [])
+
+        def parse_candidates(max_dist_km):
+            cands = []
+            for st in stations:
+                try:
+                    lat  = float(st.get('Latitude', 0))
+                    lon  = float(st.get('Longitude', 0))
+                    dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
+                    if dist > max_dist_km:
+                        continue
+                    obs      = st.get('Observation', {})
+                    rain_raw = obs.get('Rainfall', {})
+                    rain     = (float(rain_raw.get('Value') or 0)
+                                if isinstance(rain_raw, dict) else float(rain_raw or 0))
+                    temp     = float((obs.get('AirTemperature', {}) or {}).get('Value') or 0)
+                    hum      = float((obs.get('RelativeHumidity', {}) or {}).get('Value') or 0)
+                    wind     = float((obs.get('WindSpeed', {}) or {}).get('Value') or 0)
+                    cands.append({
+                        'name': st.get('StationNameThai', st.get('StationNameEng', '?')),
+                        'dist': dist, 'rain_3h': rain,
+                        'temp': temp, 'humidity': hum, 'wind_speed': wind,
+                    })
+                except Exception:
+                    continue
+            return cands
+
+        # ลอง radius 35 กม. ก่อน (สิงห์บุรี+อินทร์บุรี)
+        candidates = parse_candidates(35)
+        used_radius = 35
+        if not candidates:
+            # fallback ขยาย 80 กม.
+            candidates = parse_candidates(80)
+            used_radius = 80
+            print(f"⚠️ TMD Obs: ไม่พบสถานีใน 35 กม. ขยายเป็น 80 กม.")
+
+        if not candidates:
+            print("⚠️ TMD Obs: ไม่พบสถานีในรัศมีใดเลย")
+            return result
+
+        candidates.sort(key=lambda x: x['dist'])
+
+        # weighted average จาก 3 สถานีใกล้สุด (น้ำหนัก 1/dist²)
+        top3 = candidates[:3]
+        total_w = sum(1.0 / (c['dist'] ** 2) for c in top3)
+        if total_w > 0:
+            w_rain = sum(c['rain_3h'] * (1.0 / (c['dist'] ** 2)) for c in top3) / total_w
+            w_temp = sum(c['temp']    * (1.0 / (c['dist'] ** 2)) for c in top3) / total_w
+            w_hum  = sum(c['humidity']* (1.0 / (c['dist'] ** 2)) for c in top3) / total_w
+            w_wind = sum(c['wind_speed']*(1.0/(c['dist']**2)) for c in top3) / total_w
+        else:
+            best   = top3[0]
+            w_rain, w_temp, w_hum, w_wind = (best['rain_3h'], best['temp'],
+                                              best['humidity'], best['wind_speed'])
+
+        best = candidates[0]  # สถานีใกล้สุดสำหรับ label
+        # ใช้ฝนสูงสุดของสถานีใกล้สุด เพื่อไม่ให้ค่าเฉลี่ยทำให้ underestimate
+        rain_report = max(w_rain, best['rain_3h'])
+
+        result.update({
+            'available': True,
+            'rain_3h': round(rain_report, 2),
+            'temp': round(w_temp, 1),
+            'humidity': round(w_hum, 1),
+            'wind_speed': round(w_wind, 1),
+            'station_name': best['name'],
+            'dist_km': round(best['dist'], 1),
+            'radius_used': used_radius,
+            'station_count': len(top3),
+        })
+        print(f"✅ TMD Obs ({len(top3)} สถานี, r={used_radius}กม.): "
+              f"ใกล้สุด={best['name']} {best['dist']:.1f}กม. "
+              f"ฝน(max/avg)={rain_report:.2f}/{w_rain:.2f}มม.")
+    except Exception as e:
+        print(f"⚠️ TMD Observation error: {e}")
+    return result
+
+
+# ─────────────────────────────────────────────
+# TMD ชุดที่ 2: พยากรณ์จากคอมพิวเตอร์สมรรถนะสูง (NWP)
+# endpoint: https://data.tmd.go.th/api/NowcastForecast/v2/
+# พยากรณ์ราย 1 ชม. ละเอียด 2 กม. — แม่นที่สุดสำหรับพื้นที่ไทย
+# ─────────────────────────────────────────────
+def get_tmd_nwp_forecast() -> dict:
+    """
+    ดึงพยากรณ์ราย 1 ชม. จากโมเดล NWP กรมอุตุฯ ตรงพิกัดอินทร์บุรี
+    คืนค่า: { available, rain_1h_max, thunder_max, wind_max, temp_avg, description }
+    """
+    result = {'available': False}
+    if not TMD_API_KEY:
+        return result
+    try:
+        # ลอง NowcastForecast ก่อน (ราย 1 ชม. ล่วงหน้า 72 ชม.)
+        url = (
+            "https://data.tmd.go.th/api/NowcastForecast/v2/"
+            f"?domain=string&APIkey={TMD_API_KEY}"
+            f"&lat={INBURI_LAT}&lon={INBURI_LON}"
+            f"&fields=rain,tc,rh,ws,thunderstorm"
+        )
+        res = requests.get(url, timeout=15)
+        print(f"TMD NWP HTTP: {res.status_code}")
+
+        # fallback: WeatherForecast endpoint
+        if res.status_code != 200:
+            url2 = (
+                "https://data.tmd.go.th/api/WeatherForecast/v2/"
+                f"?domain=string&APIkey={TMD_API_KEY}"
+                f"&lat={INBURI_LAT}&lon={INBURI_LON}"
+            )
+            res = requests.get(url2, timeout=15)
+            print(f"TMD WeatherForecast fallback HTTP: {res.status_code}")
+            if res.status_code != 200:
+                return result
+
+        data = res.json()
+
+        # รองรับ response หลายรูปแบบ
+        wf_list = data.get('WeatherForecasts', [])
+        forecasts = (
+            (wf_list[0].get('forecasts', []) if isinstance(wf_list, list) and wf_list else [])
+            or data.get('forecasts', [])
+            or data.get('Forecasts', [])
+            or (wf_list if isinstance(wf_list, list) else [])
+        )
+
+        if not forecasts:
+            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์ (response keys:", list(data.keys()), ")")
+            return result
+
+        next_6h = forecasts[:6]
+        if not next_6h:
+            print("⚠️ TMD NWP: ไม่พบข้อมูลพยากรณ์ใน 6 ชม.")
+            return result
+
+        rain_vals, thunder_vals, wind_vals, temp_vals = [], [], [], []
+        for fc in next_6h:
+            d = fc.get('data', fc)
+            try: rain_vals.append(float(d.get('rain', 0) or 0))
+            except: pass
+            try: thunder_vals.append(float(d.get('thunderstorm', 0) or 0))
+            except: pass
+            try: wind_vals.append(float(d.get('ws', 0) or 0))
+            except: pass
+            try: temp_vals.append(float(d.get('tc', 0) or 0))
+            except: pass
+
+        max_rain    = max(rain_vals,    default=0)
+        max_thunder = max(thunder_vals, default=0)
+        max_wind    = max(wind_vals,    default=0)
+        avg_temp    = sum(temp_vals) / len(temp_vals) if temp_vals else 0
+
+        if max_rain >= 35 or (max_rain >= 20 and max_thunder >= 50):
+            desc = f"🚨 NWP กรมอุตุฯ: ฝนหนักมาก {max_rain:.1f} มม./ชม. ฟ้าคะนอง {max_thunder:.0f}%"
+        elif max_rain >= 10 or (max_rain >= 5 and max_thunder >= 30):
+            desc = f"⚠️ NWP กรมอุตุฯ: ฝนหนัก {max_rain:.1f} มม./ชม. ฟ้าคะนอง {max_thunder:.0f}%"
+        elif max_rain >= 1:
+            desc = f"🌧️ NWP กรมอุตุฯ: มีฝน {max_rain:.1f} มม./ชม. ใน 6 ชม. ข้างหน้า"
+        else:
+            desc = f"☀️ NWP กรมอุตุฯ: ไม่มีฝนใน 6 ชม. ข้างหน้า"
+
+        result.update({
+            'available': True,
+            'rain_1h_max': max_rain,
+            'thunder_max': max_thunder,
+            'wind_max': max_wind,
+            'temp_avg': round(avg_temp, 1),
+            'description': desc,
+        })
+        print(f"✅ TMD NWP: ฝน={max_rain:.1f} ฟ้าคะนอง={max_thunder:.0f}% ลม={max_wind:.1f}")
+    except Exception as e:
+        print(f"⚠️ TMD NWP error: {e}")
+    return result
+
+
+# ─────────────────────────────────────────────
+# Open-Meteo: ฝนที่ตกจริงย้อนหลัง (backup)
+# ─────────────────────────────────────────────
+def get_actual_rain_last_hour() -> dict:
+    result = {'rain_1h': None, 'rain_3h': None}
+    try:
+        url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={INBURI_LAT}&longitude={INBURI_LON}"
+            f"&hourly=precipitation&past_hours=3&forecast_hours=1"
+            f"&timezone=Asia%2FBangkok"
+        )
+        res    = requests.get(url, timeout=10).json()
+        times  = res['hourly']['time']
+        precip = res['hourly']['precipitation']
+
+        now_str = datetime.now(tz).strftime("%Y-%m-%dT%H:00")
+        current_idx = next((i for i, t in enumerate(times) if t == now_str), None)
+        if current_idx is None:
+            past = [i for i, t in enumerate(times) if t <= now_str]
+            current_idx = max(past) if past else 0
+
+        if current_idx >= 1:
+            result['rain_1h'] = round(float(precip[current_idx - 1] or 0), 2)
+        if current_idx >= 3:
+            result['rain_3h'] = round(
+                sum(float(p or 0) for p in precip[max(0, current_idx-3):current_idx]), 2
+            )
+    except Exception as e:
+        print(f"⚠️ Open-Meteo actual rain error: {e}")
+    return result
+
+
+# ─────────────────────────────────────────────
+# Tomorrow.io: minutely + 6h forecast
+# ─────────────────────────────────────────────
+def get_rain_storm_forecast() -> dict:
+    TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
+    if not TOMORROW_API_KEY:
+        return {}
+    try:
+        res = requests.get(
+            f"https://api.tomorrow.io/v4/weather/forecast"
+            f"?location={INBURI_LAT},{INBURI_LON}&apikey={TOMORROW_API_KEY}",
+            timeout=10)
+        if res.status_code != 200:
+            return {}
+        data = res.json()
+
+        hourly_6h   = data['timelines']['hourly'][:6]
+        hourly_24h  = data['timelines']['hourly'][:24]
+        minutely_30 = data['timelines'].get('minutely', [])[:30]
+
+        rain_now_prob, rain_now_intensity = 0, 0
+        if minutely_30:
+            rain_now_prob = max(
+                float(m['values'].get('precipitationProbability', 0) or 0) for m in minutely_30)
+            rain_now_intensity = max(
+                float(m['values'].get('precipitationIntensity', 0) or 0) for m in minutely_30)
+
+        danger_slots, warn_slots, watch_slots, heavy_slots = [], [], [], []
+        for h in hourly_6h:
+            v         = h.get('values', {})
+            rain_prob = float(v.get('precipitationProbability', 0) or 0)
+            thunder   = float(v.get('thunderstormProbability',  0) or 0)
+            wind_spd  = float(v.get('windSpeed', 0) or 0)
+            wind_gust = float(v.get('windGust',  0) or 0)
+            intensity = float(v.get('precipitationIntensity', 0) or 0)
+            try:
+                hour_label = datetime.fromisoformat(
+                    h['time'].replace('Z', '+00:00')).astimezone(tz).strftime("%H:%M")
+            except Exception:
+                hour_label = "?"
+
+            slot     = {'time': hour_label, 'rain_prob': rain_prob, 'thunder': thunder,
+                        'wind': wind_spd, 'gust': wind_gust, 'intensity': intensity}
+            eff_wind = max(wind_spd, wind_gust * 0.7)
+
+            if   rain_prob >= 80 and (thunder >= 50 or eff_wind >= 14): danger_slots.append(slot)
+            elif rain_prob >= 60 and (thunder >= 30 or eff_wind >= 10): warn_slots.append(slot)
+            elif rain_prob >= 40 and (thunder >= 20 or eff_wind >= 7):  watch_slots.append(slot)
+            elif rain_prob >= 60:                                         heavy_slots.append(slot)
+
+        now_summary = ""
+        if rain_now_prob >= 70 or rain_now_intensity >= 2.0:
+            now_summary = f"🌧️ ฝนกำลังตกอยู่ขณะนี้ ({rain_now_intensity:.1f} มม./ชม.)"
+        elif rain_now_prob >= 40:
+            now_summary = f"🌦️ มีโอกาสฝนตกใน 30 นาทีนี้ ({rain_now_prob:.0f}%)"
+
+        max_rain_24h = max(
+            (float(h['values'].get('precipitationProbability', 0) or 0) for h in hourly_24h),
+            default=0)
+
+        return {
+            'danger_slots': danger_slots, 'warn_slots': warn_slots,
+            'watch_slots': watch_slots,   'heavy_slots': heavy_slots,
+            'now_summary': now_summary,
+            'rain_now_prob': rain_now_prob, 'rain_now_intensity': rain_now_intensity,
+            'max_rain_24h': max_rain_24h,
+        }
+    except Exception as e:
+        print(f"⚠️ Tomorrow.io error: {e}")
+        return {}
+
+
+# ─────────────────────────────────────────────
+# รวมข้อมูลฝนทั้ง 4 แหล่ง → สรุปเดียว
+# ─────────────────────────────────────────────
+def get_comprehensive_rain_info() -> dict:
+    print("กำลังดึงข้อมูลฝน/พายุจาก 4 แหล่ง...")
+
+    tmd_obs = get_tmd_observation()        # แหล่ง 1: ตรวจวัดจริง
+    tmd_nwp = get_tmd_nwp_forecast()       # แหล่ง 2: NWP กรมอุตุฯ
+    tmr     = get_rain_storm_forecast()    # แหล่ง 3: Tomorrow.io minutely+6h
+    actual  = get_actual_rain_last_hour()  # แหล่ง 4: Open-Meteo ย้อนหลัง
+
+    sources_used = []
+    if tmd_obs.get('available'):            sources_used.append('TMD สถานี')
+    if tmd_nwp.get('available'):            sources_used.append('TMD NWP')
+    if tmr:                                 sources_used.append('Tomorrow.io')
+    if actual.get('rain_1h') is not None:   sources_used.append('Open-Meteo')
+
+    # ── ฝนจริงที่ตกแล้ว ──────────────────────
+    rain_1h     = actual.get('rain_1h', 0) or 0
+    rain_3h     = actual.get('rain_3h', 0) or 0
+    tmd_rain_3h = tmd_obs.get('rain_3h', 0) or 0
+
+    # TMD สถานีน่าเชื่อถือกว่า Open-Meteo สำหรับฝนจริง
+    actual_rain_best = tmd_rain_3h if (tmd_obs.get('available') and tmd_rain_3h > 0) else rain_3h
+
+    actual_text = ""
+    if tmd_obs.get('available') and tmd_rain_3h >= 1:
+        actual_text = (
+            f"🌧️ สถานีอุตุฯ {tmd_obs['station_name']} "
+            f"(ห่าง {tmd_obs['dist_km']} กม.): ฝน 3 ชม. = {tmd_rain_3h:.1f} มม."
+        )
+    elif rain_1h >= 2:
+        actual_text = f"🌧️ มีฝนตกในชั่วโมงที่ผ่านมา {rain_1h:.1f} มม."
+
+    # ── NWP กรมอุตุฯ ─────────────────────────
+    nwp_text = tmd_nwp.get('description', '') if tmd_nwp.get('available') else ''
+
+    # ── Tomorrow.io ──────────────────────────
+    now_text      = tmr.get('now_summary', '') if tmr else ''
+    tmr_slot_text = ''
+    if tmr:
+        if tmr.get('danger_slots'):
+            s = tmr['danger_slots'][0]
+            times = ", ".join(x['time'] for x in tmr['danger_slots'][:3])
+            tmr_slot_text = (f"🚨 Tomorrow.io: เสี่ยงพายุรุนแรงช่วง {times} น. "
+                             f"โอกาสฝน {s['rain_prob']:.0f}% ลม {s['wind']:.1f} m/s")
+        elif tmr.get('warn_slots'):
+            s = tmr['warn_slots'][0]
+            times = ", ".join(x['time'] for x in tmr['warn_slots'][:3])
+            tmr_slot_text = (f"⚠️ Tomorrow.io: เสี่ยงพายุช่วง {times} น. "
+                             f"โอกาสฝน {s['rain_prob']:.0f}%")
+        elif tmr.get('watch_slots'):
+            s = tmr['watch_slots'][0]
+            times = ", ".join(x['time'] for x in tmr['watch_slots'][:3])
+            tmr_slot_text = f"👀 Tomorrow.io: เฝ้าระวังช่วง {times} น. โอกาสฝน {s['rain_prob']:.0f}%"
+
+    # ── รวม ──────────────────────────────────
+    parts = [p for p in [actual_text, nwp_text, now_text, tmr_slot_text] if p]
+    if not parts:
+        max_r = tmr.get('max_rain_24h', 0) if tmr else 0
+        parts = ([f"อาจมีฝนประปราย โอกาสสูงสุดวันนี้ {max_r:.0f}%"]
+                 if max_r >= 30 else
+                 ["ท้องฟ้าโปร่งดี ไม่มีพายุในพื้นที่อินทร์บุรี"])
+
+    combined   = " | ".join(parts)
+    confidence = f"(ข้อมูลจาก: {', '.join(sources_used)})" if sources_used else ""
+
+    # ── ระดับความเสี่ยงรวม ────────────────────
+    nwp_rain    = tmd_nwp.get('rain_1h_max', 0) or 0
+    nwp_thunder = tmd_nwp.get('thunder_max', 0) or 0
+    # ใช้ฝนสูงสุดจากทุกแหล่ง (TMD obs ครอบคลุม 3 ชม., actual ครอบคลุม 1 ชม.)
+    obs_rain_3h = tmd_obs.get('rain_3h', 0) or 0
+    has_danger  = (bool(tmr.get('danger_slots')) or nwp_rain >= 35
+                   or (nwp_rain >= 20 and nwp_thunder >= 50)
+                   or actual_rain_best >= 15
+                   or obs_rain_3h >= 30)
+    has_warn    = (bool(tmr.get('warn_slots'))   or nwp_rain >= 10
+                   or actual_rain_best >= 5
+                   or obs_rain_3h >= 10)
+    has_watch   = (bool(tmr.get('watch_slots'))  or nwp_rain >= 1
+                   or actual_rain_best >= 1
+                   or obs_rain_3h >= 1)
+
+    risk_level = ('danger' if has_danger else
+                  'warn'   if has_warn   else
+                  'watch'  if has_watch  else 'none')
+
+    return {
+        'summary': combined, 'confidence': confidence,
+        'risk_level': risk_level, 'sources': sources_used,
+        'tmd_obs': tmd_obs, 'tmd_nwp': tmd_nwp,
+        'forecast': tmr,    'actual_rain_1h': rain_1h,
+    }
+
+
+# ─────────────────────────────────────────────
+# ฟังก์ชันเดิม ไม่แตะ
+# ─────────────────────────────────────────────
 def get_hotspots():
     EE_JSON_KEY = os.environ.get("EE_JSON_KEY")
     if not EE_JSON_KEY:
         return "N/A"
     try:
-        json_key = json.loads(EE_JSON_KEY)
+        json_key    = json.loads(EE_JSON_KEY)
         credentials = ee.ServiceAccountCredentials(json_key['client_email'], key_data=EE_JSON_KEY)
         ee.Initialize(credentials)
-
-        # 1. กำหนดจุดศูนย์กลางอินทร์บุรี และปรับรัศมี (Buffer) ที่ 12,000 เมตร
         inburi_area = ee.Geometry.Point([100.3273, 15.0076]).buffer(12000)
-        
-        # 2. ดึงข้อมูล FIRMS ย้อนหลัง 24 ชั่วโมง
-        end_date = ee.Date(datetime.now(tz))
-        start_date = end_date.advance(-24, 'hour')
-        
-        dataset = ee.ImageCollection("FIRMS") \
-            .filterBounds(inburi_area) \
-            .filterDate(start_date, end_date)
-
-        # หากไม่มีดาวเทียมบินผ่านเลย ให้ถือว่าไม่พบข้อมูล
+        end_date    = ee.Date(datetime.now(tz))
+        start_date  = end_date.advance(-24, 'hour')
+        dataset = (ee.ImageCollection("FIRMS")
+                   .filterBounds(inburi_area)
+                   .filterDate(start_date, end_date))
         if dataset.size().getInfo() == 0:
             return 0
-
-        # 3. รวบรวมภาพทั้งหมดใน 24 ชม. และเลือกแบนด์ T21 (อุณหภูมิความร้อน)
-        fires = dataset.select('T21').max()
-
-        # สร้าง Mask กรองเฉพาะจุดที่มีการเผาไหม้จริงๆ
-        fire_mask = fires.gt(0)
-        fires_masked = fires.updateMask(fire_mask)
-
-        # 4. นับจำนวนพิกเซล (จุดความร้อน) ภายในพื้นที่อินทร์บุรี
+        fires        = dataset.select('T21').max()
+        fires_masked = fires.updateMask(fires.gt(0))
         stats = fires_masked.reduceRegion(
-            reducer=ee.Reducer.count(),
-            geometry=inburi_area,
-            scale=1000,  # ความละเอียดดาวเทียมอยู่ที่ประมาณ 1 กม. ต่อพิกเซล
-            maxPixels=1e9
-        )
-
+            reducer=ee.Reducer.count(), geometry=inburi_area,
+            scale=1000, maxPixels=1e9)
         count = stats.get('T21').getInfo()
-        
-        # คืนค่าจำนวนจุด (ถ้าเป็น None แปลว่าไม่พบการเผา ให้คืนค่า 0)
         return int(count) if count is not None else 0
-
     except Exception as e:
         print(f"⚠️ ระบบดาวเทียมขัดข้อง: {e}")
         return "N/A"
@@ -235,169 +519,99 @@ def _safe_float(v):
         return None
 
 def _parse_air4thai_age_seconds(st):
-    patterns = [
-        "%Y-%m-%d %H:%M",
-        "%Y-%m-%d %H:%M:%S",
-        "%d/%m/%Y %H:%M",
-        "%d/%m/%Y %H:%M:%S",
-    ]
+    patterns = ["%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S",
+                "%d/%m/%Y %H:%M", "%d/%m/%Y %H:%M:%S"]
     try:
-        lu = st.get('LastUpdate', {}) if isinstance(st, dict) else {}
+        lu        = st.get('LastUpdate', {}) if isinstance(st, dict) else {}
         date_text = str(lu.get('date') or st.get('date') or '').strip()
         time_text = str(lu.get('time') or st.get('time') or '').strip()
         if not date_text or not time_text:
             return None
-
         raw = f"{date_text} {time_text}"
-        dt = None
+        dt  = None
         for fmt in patterns:
             try:
                 dt = datetime.strptime(raw, fmt)
                 break
             except:
                 pass
-
         if dt is None:
             return None
-
         if dt.tzinfo is None:
             dt = tz.localize(dt)
-
         return max(0, int((datetime.now(tz) - dt).total_seconds()))
     except:
         return None
 
 def _weighted_pm25(rows):
-    total_w = 0.0
-    total_v = 0.0
-
+    total_w, total_v = 0.0, 0.0
     for r in rows:
-        # ใกล้กว่า = น้ำหนักมากกว่า
-        dist_w = 1 / ((r['distance'] + 1.0) ** 1.6)
-
-        # ใหม่กว่า = น้ำหนักมากกว่า
-        age_w = max(0.15, 1 - (r['age'] / r['max_age']))
-
-        # ground station ให้เครดิตสูงกว่า model
-        source_w = 1.0 if r['source'] == 'air4thai' else 0.85
-
-        w = dist_w * age_w * source_w
+        w = (1 / ((r['distance'] + 1.0) ** 1.6)
+             * max(0.15, 1 - (r['age'] / r['max_age']))
+             * (1.0 if r['source'] == 'air4thai' else 0.85))
         total_w += w
         total_v += r['pm25'] * w
-
-    if total_w == 0:
-        return None
-    return total_v / total_w
+    return total_v / total_w if total_w else None
 
 def get_accurate_pm25():
-    INBURI_LAT, INBURI_LON = 15.0076, 100.3273
-
-    # ปรับให้เข้มงวดขึ้นเพื่อความ "ตรงพื้นที่"
-    STRICT_RADIUS_KM = 20
-    FALLBACK_RADIUS_KM = 35
-    MAX_DATA_AGE_SECONDS = 7200   # 2 ชั่วโมง
-
+    STRICT_KM, FALLBACK_KM, MAX_AGE = 20, 35, 7200
     headers = {'User-Agent': 'Mozilla/5.0'}
-    air4thai_rows = []
-    gistda_value = None
-    openmeteo_value = None
+    air4thai_rows, gistda_value, openmeteo_value = [], None, None
 
-    # 1) GISTDA: ค่าตามพิกัดตรงจุด ใช้เป็น fallback ชั้นดี
     try:
-        current_ts = int(time.time())
-        url_gistda = (
+        res = requests.get(
             f"https://pm25.gistda.or.th/rest/getPM25byLocation"
-            f"?lat={INBURI_LAT}&lng={INBURI_LON}&t={current_ts}"
-        )
-        res = requests.get(url_gistda, headers=headers, timeout=15, verify=False)
+            f"?lat={INBURI_LAT}&lng={INBURI_LON}&t={int(time.time())}",
+            headers=headers, timeout=15, verify=False)
         if res.status_code == 200:
             payload = res.json()
-            data = payload.get('data', payload)
-            pm = _safe_float(data.get('pm25'))
-            if pm is not None:
-                gistda_value = pm
-    except:
-        pass
+            pm = _safe_float((payload.get('data', payload)).get('pm25'))
+            if pm is not None: gistda_value = pm
+    except: pass
 
-    # 2) Air4Thai: ใช้สถานีใกล้ + สด เป็นตัวหลัก
     try:
-        url = f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}"
-        res = requests.get(url, headers=headers, timeout=15, verify=False)
+        res = requests.get(
+            f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}",
+            headers=headers, timeout=15, verify=False)
         if res.status_code == 200:
             for st in res.json().get('stations', []):
                 pm25_val = _safe_float(st.get('LastUpdate', {}).get('PM25', {}).get('value'))
-                if pm25_val is None:
-                    continue
-
+                if pm25_val is None: continue
                 lat = _safe_float(st.get('lat'))
                 lon = _safe_float(st.get('long'))
-                if lat is None or lon is None:
-                    continue
-
+                if lat is None or lon is None: continue
                 dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
-                if dist > FALLBACK_RADIUS_KM:
-                    continue
+                if dist > FALLBACK_KM: continue
+                age = _parse_air4thai_age_seconds(st) or (MAX_AGE + 1)
+                air4thai_rows.append({'source': 'air4thai', 'pm25': pm25_val,
+                                      'distance': dist, 'age': age, 'max_age': MAX_AGE})
+    except: pass
 
-                age = _parse_air4thai_age_seconds(st)
-                if age is None:
-                    age = MAX_DATA_AGE_SECONDS + 1  # ถ้าอ่านเวลาไม่ได้ ให้ถือว่าเก่าไว้ก่อน
-
-                air4thai_rows.append({
-                    'source': 'air4thai',
-                    'pm25': pm25_val,
-                    'distance': dist,
-                    'age': age,
-                    'max_age': MAX_DATA_AGE_SECONDS
-                })
-    except:
-        pass
-
-    # 3) Open-Meteo: สำรองสุดท้าย
     try:
-        url = (
-            "https://air-quality-api.open-meteo.com/v1/air-quality"
-            f"?latitude={INBURI_LAT}&longitude={INBURI_LON}"
-            "&current=pm2_5&timezone=Asia%2FBangkok"
-        )
-        res = requests.get(url, headers=headers, timeout=10)
-        data = res.json()
-        if 'current' in data:
-            pm = _safe_float(data['current'].get('pm2_5'))
-            if pm is not None:
-                openmeteo_value = pm
-    except:
-        pass
+        res = requests.get(
+            f"https://air-quality-api.open-meteo.com/v1/air-quality"
+            f"?latitude={INBURI_LAT}&longitude={INBURI_LON}&current=pm2_5&timezone=Asia%2FBangkok",
+            headers=headers, timeout=10).json()
+        if 'current' in res:
+            pm = _safe_float(res['current'].get('pm2_5'))
+            if pm is not None: openmeteo_value = pm
+    except: pass
 
-    # A) ถ้ามีสถานีสดและใกล้จริง ใช้สถานีเป็นหลัก
-    strict_rows = [
-        r for r in air4thai_rows
-        if r['distance'] <= STRICT_RADIUS_KM and r['age'] <= MAX_DATA_AGE_SECONDS
-    ]
-    if strict_rows:
-        strict_rows.sort(key=lambda x: (x['distance'], x['age']))
-        pm = _weighted_pm25(strict_rows[:3])   # เอา 3 สถานีใกล้สุด
-        if pm is not None:
-            return f"{pm:.1f}"
+    strict = [r for r in air4thai_rows if r['distance'] <= STRICT_KM and r['age'] <= MAX_AGE]
+    if strict:
+        strict.sort(key=lambda x: (x['distance'], x['age']))
+        pm = _weighted_pm25(strict[:3])
+        if pm is not None: return f"{pm:.1f}"
 
-    # B) ถ้าไม่มีสถานีใกล้ที่สด ใช้ GISTDA ตามพิกัด
-    if gistda_value is not None:
-        return f"{gistda_value:.1f}"
+    if gistda_value is not None: return f"{gistda_value:.1f}"
 
-    # C) ถ้ายังไม่ได้ ค่อยผ่อนเกณฑ์ Air4Thai
-    loose_rows = [
-        r for r in air4thai_rows
-        if r['distance'] <= FALLBACK_RADIUS_KM and r['age'] <= MAX_DATA_AGE_SECONDS
-    ]
-    if loose_rows:
-        loose_rows.sort(key=lambda x: (x['distance'], x['age']))
-        pm = _weighted_pm25(loose_rows[:3])
-        if pm is not None:
-            return f"{pm:.1f}"
+    loose = [r for r in air4thai_rows if r['distance'] <= FALLBACK_KM and r['age'] <= MAX_AGE]
+    if loose:
+        loose.sort(key=lambda x: (x['distance'], x['age']))
+        pm = _weighted_pm25(loose[:3])
+        if pm is not None: return f"{pm:.1f}"
 
-    # D) สำรองสุดท้าย
-    if openmeteo_value is not None:
-        return f"{openmeteo_value:.1f}"
-
+    if openmeteo_value is not None: return f"{openmeteo_value:.1f}"
     return "N/A"
 
 def get_weather():
@@ -405,68 +619,67 @@ def get_weather():
     temp, pm25, rain_prob, humidity, wind, uv = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
     if TOMORROW_API_KEY:
         try:
-            tmr_url = f"https://api.tomorrow.io/v4/weather/forecast?location=14.9961,100.3253&apikey={TOMORROW_API_KEY}"
-            res = requests.get(tmr_url, timeout=10)
+            res = requests.get(
+                f"https://api.tomorrow.io/v4/weather/forecast"
+                f"?location={INBURI_LAT},{INBURI_LON}&apikey={TOMORROW_API_KEY}",
+                timeout=10)
             if res.status_code == 200:
-                tmr_res = res.json()
+                tmr_res      = res.json()
                 current_data = tmr_res['timelines']['minutely'][0]['values']
-                humidity = round(current_data['humidity'], 1)
-                wind = round(current_data['windSpeed'], 1) 
-                rain_prob = max([h['values']['precipitationProbability'] for h in tmr_res['timelines']['hourly'][:12]])
+                humidity     = round(current_data['humidity'], 1)
+                wind         = round(current_data['windSpeed'], 1)
+                rain_prob    = max(h['values']['precipitationProbability']
+                                   for h in tmr_res['timelines']['hourly'][:12])
         except: pass
     try:
-        om_weather_url = "https://api.open-meteo.com/v1/forecast?latitude=14.9961&longitude=100.3253&current=temperature_2m,uv_index&timezone=Asia%2FBangkok"
-        res = requests.get(om_weather_url, timeout=10).json()
+        res  = requests.get(
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={INBURI_LAT}&longitude={INBURI_LON}"
+            f"&current=temperature_2m,uv_index&timezone=Asia%2FBangkok",
+            timeout=10).json()
         temp = res['current']['temperature_2m']
-        uv = res['current'].get('uv_index', 'N/A')
+        uv   = res['current'].get('uv_index', 'N/A')
     except: pass
     return temp, pm25, rain_prob, humidity, wind, uv
 
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
-    water_level = None
-    bank_level = 13.10 
-    
+    water_level, bank_level = None, 13.10
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page = browser.new_page()
+        page    = browser.new_page()
         try:
             page.goto(url, timeout=60000)
             page.wait_for_selector("th[scope='row']", timeout=30000)
-            html = page.content()
-            
-            soup = BeautifulSoup(html, "html.parser")
+            soup = BeautifulSoup(page.content(), "html.parser")
             for th in soup.select("th[scope='row']"):
                 if "อินทร์บุรี" in th.get_text(strip=True):
-                    tr = th.find_parent("tr")
-                    cols = tr.find_all("td")
-                    numeric_values = []
+                    cols = th.find_parent("tr").find_all("td")
+                    nums = []
                     for td in cols:
-                        text = td.get_text(strip=True)
                         try:
-                            cleaned = re.sub(r"[ ,]", "", text)
-                            cleaned = re.sub(r"[^0-9\.\-]", "", cleaned)
-                            if cleaned and cleaned != "-":
-                                numeric_values.append(float(cleaned))
+                            c = re.sub(r"[^0-9.\-]", "",
+                                       re.sub(r"[ ,]", "", td.get_text(strip=True)))
+                            if c and c != "-": nums.append(float(c))
                         except: continue
-                    if numeric_values:
-                        water_level = numeric_values[0]
+                    if nums:
+                        water_level = nums[0]
                         break
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
         finally:
             browser.close()
-            
     return water_level, bank_level
 
 def fetch_chao_phraya_dam_discharge():
-    url = f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}"
     try:
-        res = requests.get(url, timeout=20)
+        res = requests.get(
+            f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php"
+            f"?cb={random.randint(10000, 99999)}",
+            timeout=20)
         match = re.search(r'var json_data = (\[.*\]);', res.text)
         if match:
-            data = json.loads(match.group(1))
-            val = data[0]['itc_water']['C13']['storage']  # ← ถูกต้องแล้ว
+            val = json.loads(match.group(1))[0]['itc_water']['C13']['storage']
             return float(val) if isinstance(val, (int, float)) else float(str(val).replace(',', ''))
     except Exception as e:
         print(f"⚠️ เขื่อน error: {e}")
@@ -479,79 +692,68 @@ def fetch_chao_phraya_dam_discharge():
 if __name__ == "__main__":
     print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี + พลังดาวเทียม ===")
 
-    # 1. โหลด state เดิม (ค่าของวันก่อน)
-    state = load_state()
-    prev_wl       = state.get("last_water_level")
+    state          = load_state()
+    prev_wl        = state.get("last_water_level")
     prev_discharge = state.get("last_discharge")
 
-    # 2. ดึงข้อมูลทั้งหมด — เหมือนเดิมทุกบรรทัด
-    temp, _, rain_prob, humidity, wind, uv = get_weather() 
-    pm25     = get_accurate_pm25()
+    temp, _, rain_prob, humidity, wind, uv = get_weather()
+    pm25           = get_accurate_pm25()
     wl, bank_level = get_inburi_data()
-    discharge = fetch_chao_phraya_dam_discharge()
-    hotspots  = get_hotspots()
+    discharge      = fetch_chao_phraya_dam_discharge()
+    hotspots       = get_hotspots()
 
-    # 3. สร้างข้อความเปรียบเทียบระดับน้ำและเขื่อน
-    wl_compare_text       = build_compare_text(wl,       prev_wl,       "ม.", "ระดับน้ำ")
+    wl_compare_text        = build_compare_text(wl,       prev_wl,       "ม.", "ระดับน้ำ")
     discharge_compare_text = build_compare_text(discharge, prev_discharge, "ลบ.ม./วินาที", "การระบาย")
 
-    # 4. บันทึกค่าปัจจุบันลง state (เฉพาะค่าที่ดึงได้จริง)
     new_state = dict(state)
-    if wl is not None:
-        new_state["last_water_level"] = float(wl)
-    if discharge is not None:
-        new_state["last_discharge"] = float(discharge)
+    if wl is not None:        new_state["last_water_level"] = float(wl)
+    if discharge is not None: new_state["last_discharge"]   = float(discharge)
     save_state(new_state)
 
-    # ──────────────────────────────────────────
-    # 5. สร้าง text ส่วนต่างๆ (เหมือนเดิม)
-    # ──────────────────────────────────────────
     if wl is not None:
-        diff = round(bank_level - wl, 2)
-        if diff < 0:
-            wl_text = f"ระดับน้ำ {wl} เมตร (⚠️ เกินตลิ่ง {abs(diff)} เมตร)"
-        else:
-            wl_text = f"ระดับน้ำ {wl} เมตร (ห่างจากตลิ่ง {diff} เมตร)"
+        diff    = round(bank_level - wl, 2)
+        wl_text = (f"ระดับน้ำ {wl} เมตร (⚠️ เกินตลิ่ง {abs(diff)} เมตร)" if diff < 0
+                   else f"ระดับน้ำ {wl} เมตร (ห่างจากตลิ่ง {diff} เมตร)")
     else:
         wl_text = "รออัปเดต"
+
     discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
-    
-    if hotspots == "N/A":
-        hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว"
-    elif hotspots == 0:
-        hotspot_text = "ไม่พบจุดเผาในพื้นที่ ปลอดภัยดี"
-    else:
-        hotspot_text = f"ตรวจพบ {hotspots} จุด (เฝ้าระวังควันจากการเผาไร่/นา)"
 
-    # ──────────────────────────────────────────
-    # 6. เลือกหัวข้อเฝ้าระวัง: ความร้อน vs ฝน/พายุ
-    # ──────────────────────────────────────────
+    if hotspots == "N/A":   hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว"
+    elif hotspots == 0:     hotspot_text = "ไม่พบจุดเผาในพื้นที่ ปลอดภัยดี"
+    else:                   hotspot_text = f"ตรวจพบ {hotspots} จุด (เฝ้าระวังควันจากการเผาไร่/นา)"
+
+    # ── เลือกหัวข้อเฝ้าระวัง ─────────────────
     if hotspots not in (0, "N/A") and hotspots:
-        # มีจุดเผา → ใช้หัวข้อความร้อนตามเดิม
-        watch_icon    = "🔥"
-        watch_title   = "เฝ้าระวังความร้อน"
-        watch_data    = hotspot_text
-        watch_rule    = (
-            "สรุปเรื่องจุดเผาไร่นาตามข้อมูล "
-            "ห้ามพูดว่าไฟป่าเด็ดขาด บอกเป็น 'ควันจากการเผาไร่/นา'"
-        )
+        watch_icon, watch_title = "🔥", "เฝ้าระวังความร้อน"
+        watch_data = hotspot_text
+        watch_rule = ("สรุปเรื่องจุดเผาไร่นาตามข้อมูล "
+                      "ห้ามพูดว่าไฟป่าเด็ดขาด บอกเป็น 'ควันจากการเผาไร่/นา'")
     else:
-        # ไม่มีจุดเผา → เปลี่ยนเป็นเฝ้าระวังฝน/พายุ
-        watch_icon  = "🌧️"
-        watch_title = "เฝ้าระวังฝนและพายุ"
-        rain_fc     = get_rain_storm_forecast()
-        watch_data  = rain_fc.get('summary', f"โอกาสฝน {rain_prob}% (ดึงพยากรณ์ละเอียดไม่ได้)")
-        watch_rule  = (
-            "สรุปพยากรณ์ฝน/พายุจากข้อมูลที่ให้ไว้อย่างตรงไปตรงมา "
-            "ถ้ามีความเสี่ยงให้เตือน ถ้าไม่มีให้บอกว่าสบายใจได้ "
-            "ห้ามกุเรื่องหรือเพิ่มระดับความรุนแรงเกินข้อมูลจริง"
-        )
+        watch_icon, watch_title = "🌧️", "เฝ้าระวังฝนและพายุ"
 
-    # ──────────────────────────────────────────
-    # 7. สร้าง prompt — โครงสร้างเดิมทุกอย่าง เพิ่มแค่ข้อมูลเปรียบเทียบ
-    # ──────────────────────────────────────────
-    wl_full_text       = wl_text + (f"\n    (เทียบเมื่อวาน: {wl_compare_text})" if wl_compare_text else "")
-    discharge_full_text = discharge_text + (f"\n    (เทียบเมื่อวาน: {discharge_compare_text})" if discharge_compare_text else "")
+        rain_info  = get_comprehensive_rain_info()   # ← รวม 4 แหล่ง
+        watch_data = rain_info['summary']
+        if rain_info.get('confidence'):
+            watch_data += f"\n    {rain_info['confidence']}"
+
+        risk = rain_info.get('risk_level', 'none')
+        if risk == 'danger':
+            watch_rule = ("มีความเสี่ยงพายุรุนแรงจากหลายแหล่งข้อมูล ให้เตือนชัดเจนจริงจัง "
+                          "แนะนำให้ระวังตัวและอยู่ในที่ปลอดภัย")
+        elif risk == 'warn':
+            watch_rule = ("มีความเสี่ยงพายุ ให้เตือนอย่างจริงจัง "
+                          "ไม่ตื่นตระหนกแต่ต้องระมัดระวัง")
+        else:
+            watch_rule = ("สรุปพยากรณ์ฝน/พายุตรงไปตรงมา "
+                          "ถ้ามีความเสี่ยงให้เตือน ถ้าไม่มีให้บอกว่าสบายใจได้ "
+                          "ห้ามกุเรื่องหรือเพิ่มความรุนแรงเกินจริง")
+
+    wl_full_text = (wl_text
+                    + (f"\n    (เทียบเมื่อวาน: {wl_compare_text})" if wl_compare_text else ""))
+    discharge_full_text = (discharge_text
+                           + (f"\n    (เทียบเมื่อวาน: {discharge_compare_text})"
+                              if discharge_compare_text else ""))
 
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
@@ -564,24 +766,24 @@ if __name__ == "__main__":
 
     กฎการเขียน:
     1. {watch_title}: {watch_rule}
-    2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. ให้เปลี่ยนเป็น 'เมตร')
-    3. ความไม่จำเจ: ให้ใส่ 'อารมณ์ขัน' หรือ 'การทักทายตามวัน' ลงไปในสรุป
+    2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
+    3. ความไม่จำเจ: ใส่อารมณ์ขันหรือทักทายตามวันลงในสรุป
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ระดับน้ำและเขื่อน: ถ้ามีข้อมูลเปรียบเทียบกับเมื่อวาน ให้พูดถึงแนวโน้มแบบเป็นธรรมชาติ (เพิ่ม/ลด/ทรงตัว) ไม่ต้องพูดตัวเลขซ้ำ
+    5. ระดับน้ำและเขื่อน: พูดแนวโน้มแบบธรรมชาติ ไม่ต้องพูดตัวเลขซ้ำ
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ {date_str} เวลา {time_str})
-    
-    🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
-    {watch_icon} **{watch_title}:** [{watch_rule}]
-    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำเป็นเมตรแบบเข้าใจง่าย พร้อมแนวโน้มเปรียบกับเมื่อวานถ้ามีข้อมูล]
-    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ พร้อมแนวโน้มเปรียบกับเมื่อวานถ้ามีข้อมูล]
 
-    📌 **สรุป:** [ใส่ความจำเจ/อารมณ์ขัน/ทักทายตามวัน 1-2 บรรทัด]
+    🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
+    {watch_icon} **{watch_title}:** [สรุปตาม {watch_rule}]
+    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำเป็นเมตร พร้อมแนวโน้มเทียบเมื่อวานถ้ามี]
+    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ พร้อมแนวโน้มถ้ามี]
+
+    📌 **สรุป:** [อารมณ์ขัน/ทักทายตามวัน 1-2 บรรทัด]
     """
-    
+
     max_retries = 5
-    final_post = ""
+    final_post  = ""
     for attempt in range(max_retries):
         try:
             print(f"กำลังร่างโพสต์ (รอบที่ {attempt+1})...")
@@ -595,15 +797,15 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Error: {e}")
             if attempt < max_retries - 1:
-                wait = 10 * (2 ** attempt)  # 10, 20, 40, 80 วินาที
+                wait = 10 * (2 ** attempt)
                 print(f"รอ {wait} วินาที...")
                 time.sleep(wait)
             else:
                 final_post = "**สถานการณ์อินทร์บุรี**... (ระบบ AI ขัดข้องชั่วคราว)"
 
     print("\nข้อความที่จะโพสต์:\n", final_post)
-    
+
     if MAKE_WEBHOOK_URL and final_post and "ขัดข้องชั่วคราว" not in final_post:
         res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post})
-        if res.status_code == 200: 
+        if res.status_code == 200:
             print("\n✅ ส่ง Webhook สำเร็จ!")
