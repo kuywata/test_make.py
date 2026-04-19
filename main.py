@@ -106,46 +106,70 @@ def get_tmd_observation() -> dict:
         if res.status_code != 200:
             return result
 
-        data     = res.json()
+        raw = res.text.strip()
+        if not raw:
+            print("⚠️ TMD Obs: response body ว่างเปล่า (token อาจหมดอายุ)")
+            return result
+        try:
+            data = res.json()
+        except Exception as je:
+            print(f"⚠️ TMD Obs: JSON parse ไม่ได้ ({je}) | body={raw[:120]!r}")
+            return result
+
         stations = data.get('Stations', {}).get('Station', [])
 
-        candidates = []
-        for st in stations:
-            try:
-                lat  = float(st.get('Latitude', 0))
-                lon  = float(st.get('Longitude', 0))
-                dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
-                if dist > 100:
+        def _parse_cands(max_dist_km):
+            cands = []
+            for st in stations:
+                try:
+                    lat  = float(st.get('Latitude', 0))
+                    lon  = float(st.get('Longitude', 0))
+                    dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
+                    if dist > max_dist_km:
+                        continue
+                    obs      = st.get('Observation', {})
+                    rain_raw = obs.get('Rainfall', {})
+                    rain     = float(rain_raw.get('Value') or 0) if isinstance(rain_raw, dict) else float(rain_raw or 0)
+                    temp     = float((obs.get('AirTemperature', {}) or {}).get('Value') or 0)
+                    hum      = float((obs.get('RelativeHumidity', {}) or {}).get('Value') or 0)
+                    wind     = float((obs.get('WindSpeed', {}) or {}).get('Value') or 0)
+                    cands.append({
+                        'name': st.get('StationNameThai', st.get('StationNameEng', '?')),
+                        'dist': dist, 'rain_3h': rain,
+                        'temp': temp, 'humidity': hum, 'wind_speed': wind,
+                    })
+                except Exception:
                     continue
-                obs      = st.get('Observation', {})
-                rain_raw = obs.get('Rainfall', {})
-                rain     = float(rain_raw.get('Value') or 0) if isinstance(rain_raw, dict) else float(rain_raw or 0)
-                temp     = float((obs.get('AirTemperature', {}) or {}).get('Value') or 0)
-                hum      = float((obs.get('RelativeHumidity', {}) or {}).get('Value') or 0)
-                wind     = float((obs.get('WindSpeed', {}) or {}).get('Value') or 0)
-                candidates.append({
-                    'name': st.get('StationNameThai', st.get('StationNameEng', '?')),
-                    'dist': dist, 'rain_3h': rain,
-                    'temp': temp, 'humidity': hum, 'wind_speed': wind,
-                })
-            except Exception:
-                continue
+            return cands
 
+        candidates = _parse_cands(35)   # สิงห์บุรี-อินทร์บุรีก่อน
         if not candidates:
+            candidates = _parse_cands(80)
+            print("⚠️ TMD Obs: ไม่พบสถานีใน 35 กม. ขยายเป็น 80 กม.")
+        if not candidates:
+            print("⚠️ TMD Obs: ไม่พบสถานีเลย")
             return result
 
         candidates.sort(key=lambda x: x['dist'])
-        best = candidates[0]
+        top3    = candidates[:3]
+        total_w = sum(1.0 / max(c['dist'], 0.1) ** 2 for c in top3)
+        w_rain  = sum(c['rain_3h']    / max(c['dist'], 0.1) ** 2 for c in top3) / total_w
+        w_temp  = sum(c['temp']       / max(c['dist'], 0.1) ** 2 for c in top3) / total_w
+        w_hum   = sum(c['humidity']   / max(c['dist'], 0.1) ** 2 for c in top3) / total_w
+        w_wind  = sum(c['wind_speed'] / max(c['dist'], 0.1) ** 2 for c in top3) / total_w
+        best    = candidates[0]
+        rain_report = max(w_rain, best['rain_3h'])  # ไม่ underestimate
+
         result.update({
             'available': True,
-            'rain_3h': best['rain_3h'],
-            'temp': best['temp'],
-            'humidity': best['humidity'],
-            'wind_speed': best['wind_speed'],
+            'rain_3h': round(rain_report, 2),
+            'temp': round(w_temp, 1),
+            'humidity': round(w_hum, 1),
+            'wind_speed': round(w_wind, 1),
             'station_name': best['name'],
             'dist_km': round(best['dist'], 1),
         })
-        print(f"✅ TMD Obs: {best['name']} ห่าง {best['dist']:.1f} กม. ฝน={best['rain_3h']} มม.")
+        print(f"✅ TMD Obs ({len(top3)} สถานี): {best['name']} {best['dist']:.1f}กม. ฝน={rain_report:.2f}มม.")
     except Exception as e:
         print(f"⚠️ TMD Observation error: {e}")
     return result
@@ -187,14 +211,23 @@ def get_tmd_nwp_forecast() -> dict:
             if res.status_code != 200:
                 return result
 
-        data = res.json()
+        raw = res.text.strip()
+        if not raw:
+            print("⚠️ TMD NWP: response body ว่างเปล่า (token อาจหมดอายุ)")
+            return result
+        try:
+            data = res.json()
+        except Exception as je:
+            print(f"⚠️ TMD NWP: JSON parse ไม่ได้ ({je}) | body={raw[:120]!r}")
+            return result
 
         # รองรับ response หลายรูปแบบ
+        wf_list   = data.get('WeatherForecasts', [])
         forecasts = (
-            data.get('WeatherForecasts', [{}])[0].get('forecasts', [])
+            (wf_list[0].get('forecasts', []) if isinstance(wf_list, list) and wf_list else [])
             or data.get('forecasts', [])
             or data.get('Forecasts', [])
-            or data.get('WeatherForecasts', [])
+            or (wf_list if isinstance(wf_list, list) else [])
         )
 
         next_6h = forecasts[:6]
