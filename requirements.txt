@@ -1,2 +1,7 @@
+requests
+google-genai
+pytz
+beautifulsoup4
+playwright
 earthengine-api
 google-api-python-client
