@@ -178,7 +178,6 @@ def get_tmd_observation() -> dict:
 
 # ─────────────────────────────────────────────
 # TMD ชุดที่ 2: พยากรณ์จากกรมอุตุฯ (WeatherForecast)
-# endpoint: https://data.tmd.go.th/api/WeatherForecast/v2/
 # ─────────────────────────────────────────────
 def get_tmd_nwp_forecast() -> dict:
     result = {'available': False}
@@ -864,10 +863,9 @@ def fetch_chao_phraya_dam_discharge():
     return None
 
 # ─────────────────────────────────────────────
-# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้วจากไฟล์ Excel
+# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้ว (แบบยืดหยุ่น หาค่าใกล้เคียงที่สุด)
 # ─────────────────────────────────────────────
 def get_historical_water_data(target_date):
-    # ชื่อไฟล์ Excel ที่เราจะใช้อ่านข้อมูล (ต้องตรงกับชื่อไฟล์ใน Repo)
     file_paths = ['ข้อมูลน้ำอินทร์บุรี2568.xlsx', 'โพนางดำ.xlsx']
     records = []
     
@@ -875,7 +873,6 @@ def get_historical_water_data(target_date):
         if not os.path.exists(file_path):
             continue
         try:
-            # ใช้ openpyxl โหลดไฟล์ (data_only=True เพื่อเอาค่าดิบ ไม่เอาสูตร)
             wb = openpyxl.load_workbook(file_path, data_only=True)
         except Exception as e:
             print(f"⚠️ ไม่สามารถอ่านไฟล์ {file_path} ได้: {e}")
@@ -883,21 +880,20 @@ def get_historical_water_data(target_date):
             
         station_name = "อินทร์บุรี" if "อินทร์" in file_path else "โพนางดำ" if "โพ" in file_path else "จุดวัด"
         
+        closest_diff = None
+        best_record = None
+        
         for sheet_name in wb.sheetnames:
             sheet = wb[sheet_name]
-            # อ่านหัวตาราง (header) จากแถวแรก
             headers = [cell.value for cell in sheet[1]]
             
-            # ค้นหา index ของคอลัมน์แบบยืดหยุ่นรองรับหลายรูปแบบ
             date_col_idx = next((i for i, h in enumerate(headers) if h and 'วัน' in str(h)), None)
             wl_col_idx = next((i for i, h in enumerate(headers) if h and str(h).strip() in ['ระดับน้ำ + ตลิ่ง', 'ระดับน้ำ(ม.รทก.)', 'ระดับน้ำ (ม.รทก.)']), None)
             dis_col_idx = next((i for i, h in enumerate(headers) if h and 'ปริมาณน้ำปล่อย' in str(h)), None)
             
-            # ถ้าหาคอลัมน์จำเป็นไม่ครบให้ข้าม sheet นี้ไป
             if date_col_idx is None or wl_col_idx is None or dis_col_idx is None:
                 continue
                 
-            # วนลูปอ่านข้อมูลทีละแถว
             for row in sheet.iter_rows(min_row=2, values_only=True):
                 raw_date = row[date_col_idx]
                 if not raw_date: continue
@@ -909,18 +905,42 @@ def get_historical_water_data(target_date):
                     try:
                         dt = datetime.strptime(raw_date, '%d/%m/%Y %H:%M')
                     except:
-                        pass
-                        
-                # ถ้าเจอข้อมูลที่วันและเดือนตรงกับ target_date (ปีที่แล้ว)
-                if dt and dt.month == target_date.month and dt.day == target_date.day:
-                    wl_val = str(row[wl_col_idx]).split('/')[0].strip()
-                    dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
-                    if dis_val in ['None', 'nan', '']: dis_val = '-'
-                    records.append(f"[{station_name}] เวลา {dt.strftime('%H:%M')} น. ระดับน้ำ {wl_val} ม. (ระบาย {dis_val} ลบ.ม./วินาที)")
+                        try:
+                            dt = datetime.strptime(raw_date.split()[0], '%Y-%m-%d')
+                        except:
+                            pass
+                            
+                if dt and dt.year == target_date.year:
+                    # ตัดเรื่อง Timezone ออกเพื่อเอามาลบกันหาจำนวนวันที่ห่างกัน
+                    dt_naive = dt.replace(tzinfo=None)
+                    target_naive = target_date.replace(tzinfo=None)
+                    diff = abs((target_naive - dt_naive).days)
+                    
+                    # ถ้าเจอวันที่ตรงเป๊ะ (diff == 0) ให้หยุดหาของสถานีนี้เลย
+                    if diff == 0:
+                        wl_val = str(row[wl_col_idx]).split('/')[0].strip()
+                        dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
+                        if dis_val in ['None', 'nan', '']: dis_val = '-'
+                        best_record = f"[{station_name}] (ตรงกับวันนี้ปีที่แล้ว) ระดับน้ำ {wl_val} ม. (ระบาย {dis_val} ลบ.ม./วินาที)"
+                        closest_diff = 0
+                        break
+                    
+                    # ถ้าไม่ตรงเป๊ะ ให้เก็บค่าที่ใกล้เคียงที่สุดไว้ (แต่ไม่ควรเกิน 20 วัน)
+                    elif diff <= 20:
+                        if closest_diff is None or diff < closest_diff:
+                            closest_diff = diff
+                            wl_val = str(row[wl_col_idx]).split('/')[0].strip()
+                            dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
+                            if dis_val in ['None', 'nan', '']: dis_val = '-'
+                            best_record = f"[{station_name}] (ข้อมูลใกล้เคียงวันที่ {dt.strftime('%d/%m/%Y')}) ระดับน้ำ {wl_val} ม. (ระบาย {dis_val} ลบ.ม./วินาที)"
+
+        if best_record:
+            records.append(best_record)
                     
     if records:
         return "\n".join(records)
-    return "ไม่มีบันทึกข้อมูลของปีที่แล้วในวันนี้"
+    return "ไม่มีบันทึกข้อมูลของปีที่แล้วในช่วงนี้ (สถานการณ์น้ำน่าจะปกติ)"
+
 
 # ─────────────────────────────────────────────
 # Main
@@ -993,11 +1013,10 @@ if __name__ == "__main__":
                            + (f"\n    (เทียบเมื่อวาน: {discharge_compare_text})"
                               if discharge_compare_text else ""))
 
-    # ── ดึงข้อมูลน้ำย้อนหลัง 1 ปี (วันที่เดียวกันของปีที่แล้ว) ────────
+    # ── ดึงข้อมูลน้ำย้อนหลัง 1 ปี ────────
     try:
         last_year_date = datetime(now.year - 1, now.month, now.day)
     except ValueError:
-        # ดักจับกรณี 29 ก.พ. แล้วปีที่แล้วไม่มีวันที่นี้ ให้ขยับเป็น 28 ก.พ. แทน
         last_year_date = datetime(now.year - 1, now.month, now.day - 1)
         
     historical_water_text = get_historical_water_data(last_year_date)
@@ -1010,23 +1029,23 @@ if __name__ == "__main__":
     - {watch_title}: {watch_data}
     - ระดับน้ำปัจจุบัน: {wl_full_text}
     - ระบายเขื่อนปัจจุบัน: {discharge_full_text}
-    - 📊 ข้อมูลน้ำย้อนหลัง (วันที่เดียวกันของปีที่แล้ว): 
-{historical_water_text}
+    - 📊 ข้อมูลน้ำย้อนหลัง: 
+    {historical_water_text}
 
     กฎการเขียน:
     1. {watch_title}: {watch_rule}
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
     3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลที่ให้มา
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ระดับน้ำและเขื่อน: ให้เล่าระดับน้ำปัจจุบันและแนวโน้มเทียบกับเมื่อวาน และ "ต้อง" หยิบสถานการณ์น้ำย้อนหลังของปีที่แล้ว (ถ้ามีข้อมูล) มาเปรียบเทียบให้ชาวบ้านเห็นภาพว่า ปีนี้เทียบกับปีที่แล้วในช่วงเวลาเดียวกันมันดีกว่า แย่กว่า หรือใกล้เคียงกัน (ไม่ต้องลอกมาทุกตัวเลข ให้เล่าสรุปรวมๆ ให้อ่านง่าย)
+    5. ระดับน้ำและเขื่อน: ให้เล่าระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และหยิบสถานการณ์น้ำย้อนหลัง (ถ้ามี) มาเปรียบเทียบให้ชาวบ้านเห็นภาพว่าปีนี้กับช่วงเวลาไล่เลี่ยกันของปีที่แล้วต่างกันแค่ไหน (เล่าสรุปรวมๆ ให้อ่านง่าย)
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
 
     🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
     {watch_icon} **{watch_title}:** [สรุปตาม {watch_rule}]
-    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และเปรียบเทียบกับภาพรวมระดับน้ำปีที่แล้ว]
-    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำปัจจุบัน และเปรียบเทียบกับการระบายปีที่แล้ว]
+    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และเปรียบเทียบกับภาพรวมระดับน้ำปีที่แล้วแบบเนียนๆ]
+    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำปัจจุบัน และเปรียบเทียบกับการระบายปีที่แล้วแบบเนียนๆ]
 
     📌 **สรุป:** [ทักทายตามวัน{thai_day_of_week} 1-2 บรรทัด]
     """
