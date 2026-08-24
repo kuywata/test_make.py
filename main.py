@@ -5,6 +5,7 @@ import random
 import requests
 import math
 import time
+import openpyxl
 from datetime import datetime, timedelta, timezone
 import pytz
 import ee
@@ -93,12 +94,10 @@ def get_tmd_observation() -> dict:
         print("⚠️ TMD_API_KEY ไม่พบ")
         return result
     try:
-        # แก้จุดที่ 1: ลบ domain=string ออก
         url = (
             "https://data.tmd.go.th/api/Weather3Hours/v2/"
             f"?APIkey={TMD_API_KEY}&station_type=ตรวจอากาศผิวพื้น"
         )
-        # เพิ่ม headers บังคับขอรับข้อมูลเป็น JSON
         headers = {'Accept': 'application/json'}
         res = requests.get(url, headers=headers, timeout=15)
         print(f"TMD Observation HTTP: {res.status_code}")
@@ -186,7 +185,6 @@ def get_tmd_nwp_forecast() -> dict:
     if not TMD_API_KEY:
         return result
 
-    # แก้จุดที่ 2: ลบ domain=string ออกจากทั้ง 2 endpoint
     endpoints = [
         (
             "https://data.tmd.go.th/api/WeatherForecast/v2/"
@@ -202,7 +200,7 @@ def get_tmd_nwp_forecast() -> dict:
     ]
 
     data = None
-    headers = {'Accept': 'application/json'} # เพิ่ม headers ตรงนี้
+    headers = {'Accept': 'application/json'}
     for ep_url in endpoints:
         try:
             res = requests.get(ep_url, headers=headers, timeout=15)
@@ -293,7 +291,6 @@ def get_actual_rain_last_hour() -> dict:
             f"&hourly=precipitation&past_hours=3&forecast_hours=1"
             f"&timezone=Asia%2FBangkok"
         )
-        # แก้จุดที่ 3: เปลี่ยน timeout เป็น 20
         res    = requests.get(url, timeout=20).json()
         times  = res['hourly']['time']
         precip = res['hourly']['precipitation']
@@ -408,7 +405,6 @@ def get_comprehensive_rain_info() -> dict:
     rain_3h     = actual.get('rain_3h', 0) or 0
     tmd_rain_3h = tmd_obs.get('rain_3h', 0) or 0
 
-    # TMD สถานีน่าเชื่อถือกว่า Open-Meteo สำหรับฝนจริง
     actual_rain_best = tmd_rain_3h if (tmd_obs.get('available') and tmd_rain_3h > 0) else rain_3h
 
     actual_text = ""
@@ -546,15 +542,6 @@ def _weighted_pm25(rows):
 
 
 def classify_pm25_th(pm25_value):
-    """
-    อ้างอิงเกณฑ์ AQI ไทยปี 2566 ของ คพ.
-    PM2.5:
-      0-15      = ดีมาก
-      15.1-25   = ดี
-      25.1-37.5 = ปานกลาง/เริ่มกระทบกลุ่มเสี่ยง
-      37.6-75   = เริ่มมีผลกระทบต่อสุขภาพ
-      >75       = มีผลกระทบต่อสุขภาพมาก
-    """
     pm = _safe_float(pm25_value)
     if pm is None:
         return {
@@ -609,19 +596,7 @@ def build_pm25_instruction(pm25_value, source_label='ระบบคัดกร
 
 
 def get_accurate_pm25(return_meta=False):
-    """
-    ดึงค่า PM2.5 โดยกัน under-report ให้มากที่สุดเท่าที่ทำได้จากแหล่งข้อมูลภายนอก
-    โดยแตะเฉพาะระบบฝุ่นเท่านั้น
-
-    ลำดับใหม่:
-      [1] Air4Thai ≤20 กม. อายุ ≤1 ชม.      (สถานีจริง ใกล้สุด)
-      [2] Air4Thai ≤50 กม. อายุ ≤3 ชม.      (restore พฤติกรรมเดิมที่แม่นกว่าโค้ดใหม่)
-      [3] WAQI สถานีสิงห์บุรี/ใกล้เคียง      (ground station fallback)
-      [4] max(GISTDA, Open-Meteo)            (protective ceiling กันบอกว่าอากาศดีทั้งที่ฝุ่นเริ่มขึ้น)
-      [5] OWM                                 (fallback สุดท้าย)
-      [6] Air4Thai stale ≤50 กม.             (ดีกว่า N/A)
-    """
-    PM_LAT, PM_LON = 15.0076, 100.3273  # ใช้พิกัดชุดเก่าที่ผู้ใช้บอกว่าแม่นกว่า เฉพาะ PM เท่านั้น
+    PM_LAT, PM_LON = 15.0076, 100.3273
     STRICT_KM = 20
     WIDE_KM = 50
     STRICT_AGE = 3600
@@ -632,7 +607,6 @@ def get_accurate_pm25(return_meta=False):
     gistda_value = waqi_value = owm_value = openmeteo_value = None
     selected_source = None
 
-    # ── 1. GISTDA ────────────────────────────────────────
     try:
         res = requests.get(
             f"https://pm25.gistda.or.th/rest/getPM25byLocation"
@@ -648,7 +622,6 @@ def get_accurate_pm25(return_meta=False):
     except Exception as e:
         print(f"⚠️ GISTDA error: {e}")
 
-    # ── 2. Air4Thai (PCD) — รัศมี 50 กม. ────────────────
     try:
         res = requests.get(
             f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}",
@@ -688,7 +661,6 @@ def get_accurate_pm25(return_meta=False):
     except Exception as e:
         print(f"⚠️ Air4Thai error: {e}")
 
-    # ── 3. WAQI — สถานีสิงห์บุรีโดยตรง ──────────────────
     WAQI_TOKEN = os.environ.get("WAQI_TOKEN")
     if WAQI_TOKEN:
         for sid in ["419585", "419584"]:
@@ -737,7 +709,6 @@ def get_accurate_pm25(return_meta=False):
     else:
         print("⚠️ WAQI_TOKEN ไม่พบ")
 
-    # ── 4. OpenWeatherMap Air Pollution API ───────────────
     OWM_API_KEY = os.environ.get("OWM_API_KEY")
     if OWM_API_KEY:
         try:
@@ -757,7 +728,6 @@ def get_accurate_pm25(return_meta=False):
     else:
         print("⚠️ OWM_API_KEY ไม่พบ")
 
-    # ── 5. Open-Meteo ─────────────────────────────────────
     try:
         res = requests.get(
             f"https://air-quality-api.open-meteo.com/v1/air-quality"
@@ -774,9 +744,7 @@ def get_accurate_pm25(return_meta=False):
     except Exception as e:
         print(f"⚠️ Open-Meteo error: {e}")
 
-    # ── Decision Logic ────────────────────────────────────
 
-    # [1] Air4Thai ใกล้มากและสดมาก
     strict = [r for r in air4thai_rows if r['distance'] <= STRICT_KM and r['age'] <= STRICT_AGE]
     if strict:
         strict.sort(key=lambda x: (x['distance'], x['age']))
@@ -786,7 +754,6 @@ def get_accurate_pm25(return_meta=False):
             print(f"✅ ใช้ {selected_source}: {pm:.1f}")
             return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
-    # [2] Air4Thai กว้างขึ้นแต่ยังสดพอ (restore แบบโค้ดเก่า)
     wide = [r for r in air4thai_rows if r['distance'] <= WIDE_KM and r['age'] <= WIDE_AGE]
     if wide:
         wide.sort(key=lambda x: (x['distance'], x['age']))
@@ -796,13 +763,11 @@ def get_accurate_pm25(return_meta=False):
             print(f"✅ ใช้ {selected_source}: {pm:.1f}")
             return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
-    # [3] WAQI เป็นสถานีภาคพื้น ให้มาก่อนดาวเทียม
     if waqi_value is not None:
         selected_source = "WAQI สถานีใกล้เคียง"
         print(f"✅ ใช้ {selected_source}: {waqi_value:.1f}")
         return ({'pm25': f"{waqi_value:.1f}", 'source': selected_source} if return_meta else f"{waqi_value:.1f}")
 
-    # [4] ไม่มีสถานีภาคพื้น → ใช้ protective ceiling กัน false-good
     ceiling_candidates = [v for v in [gistda_value, openmeteo_value] if v is not None]
     if ceiling_candidates:
         pm = max(ceiling_candidates)
@@ -810,13 +775,11 @@ def get_accurate_pm25(return_meta=False):
         print(f"✅ ใช้ {selected_source}: {pm:.1f} จาก {ceiling_candidates}")
         return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
-    # [5] OWM fallback
     if owm_value is not None:
         selected_source = "OpenWeatherMap fallback"
         print(f"✅ ใช้ {selected_source}: {owm_value:.1f}")
         return ({'pm25': f"{owm_value:.1f}", 'source': selected_source} if return_meta else f"{owm_value:.1f}")
 
-    # [6] Air4Thai stale ยังดีกว่า N/A
     stale = [r for r in air4thai_rows if r['distance'] <= WIDE_KM]
     if stale:
         stale.sort(key=lambda x: (x['age'], x['distance']))
@@ -900,6 +863,64 @@ def fetch_chao_phraya_dam_discharge():
         print(f"⚠️ เขื่อน error: {e}")
     return None
 
+# ─────────────────────────────────────────────
+# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้วจากไฟล์ Excel
+# ─────────────────────────────────────────────
+def get_historical_water_data(target_date):
+    # ชื่อไฟล์ Excel ที่เราจะใช้อ่านข้อมูล (ต้องตรงกับชื่อไฟล์ใน Repo)
+    file_paths = ['ข้อมูลน้ำอินทร์บุรี2568.xlsx', 'โพนางดำ.xlsx']
+    records = []
+    
+    for file_path in file_paths:
+        if not os.path.exists(file_path):
+            continue
+        try:
+            # ใช้ openpyxl โหลดไฟล์ (data_only=True เพื่อเอาค่าดิบ ไม่เอาสูตร)
+            wb = openpyxl.load_workbook(file_path, data_only=True)
+        except Exception as e:
+            print(f"⚠️ ไม่สามารถอ่านไฟล์ {file_path} ได้: {e}")
+            continue
+            
+        station_name = "อินทร์บุรี" if "อินทร์" in file_path else "โพนางดำ" if "โพ" in file_path else "จุดวัด"
+        
+        for sheet_name in wb.sheetnames:
+            sheet = wb[sheet_name]
+            # อ่านหัวตาราง (header) จากแถวแรก
+            headers = [cell.value for cell in sheet[1]]
+            
+            # ค้นหา index ของคอลัมน์แบบยืดหยุ่นรองรับหลายรูปแบบ
+            date_col_idx = next((i for i, h in enumerate(headers) if h and 'วัน' in str(h)), None)
+            wl_col_idx = next((i for i, h in enumerate(headers) if h and str(h).strip() in ['ระดับน้ำ + ตลิ่ง', 'ระดับน้ำ(ม.รทก.)', 'ระดับน้ำ (ม.รทก.)']), None)
+            dis_col_idx = next((i for i, h in enumerate(headers) if h and 'ปริมาณน้ำปล่อย' in str(h)), None)
+            
+            # ถ้าหาคอลัมน์จำเป็นไม่ครบให้ข้าม sheet นี้ไป
+            if date_col_idx is None or wl_col_idx is None or dis_col_idx is None:
+                continue
+                
+            # วนลูปอ่านข้อมูลทีละแถว
+            for row in sheet.iter_rows(min_row=2, values_only=True):
+                raw_date = row[date_col_idx]
+                if not raw_date: continue
+                
+                dt = None
+                if isinstance(raw_date, datetime):
+                    dt = raw_date
+                elif isinstance(raw_date, str):
+                    try:
+                        dt = datetime.strptime(raw_date, '%d/%m/%Y %H:%M')
+                    except:
+                        pass
+                        
+                # ถ้าเจอข้อมูลที่วันและเดือนตรงกับ target_date (ปีที่แล้ว)
+                if dt and dt.month == target_date.month and dt.day == target_date.day:
+                    wl_val = str(row[wl_col_idx]).split('/')[0].strip()
+                    dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
+                    if dis_val in ['None', 'nan', '']: dis_val = '-'
+                    records.append(f"[{station_name}] เวลา {dt.strftime('%H:%M')} น. ระดับน้ำ {wl_val} ม. (ระบาย {dis_val} ลบ.ม./วินาที)")
+                    
+    if records:
+        return "\n".join(records)
+    return "ไม่มีบันทึกข้อมูลของปีที่แล้วในวันนี้"
 
 # ─────────────────────────────────────────────
 # Main
@@ -972,29 +993,40 @@ if __name__ == "__main__":
                            + (f"\n    (เทียบเมื่อวาน: {discharge_compare_text})"
                               if discharge_compare_text else ""))
 
+    # ── ดึงข้อมูลน้ำย้อนหลัง 1 ปี (วันที่เดียวกันของปีที่แล้ว) ────────
+    try:
+        last_year_date = datetime(now.year - 1, now.month, now.day)
+    except ValueError:
+        # ดักจับกรณี 29 ก.พ. แล้วปีที่แล้วไม่มีวันที่นี้ ให้ขยับเป็น 28 ก.พ. แทน
+        last_year_date = datetime(now.year - 1, now.month, now.day - 1)
+        
+    historical_water_text = get_historical_water_data(last_year_date)
+
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
     ข้อมูลดิบ: วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
     - ฝุ่น PM 2.5: {pm25_instruction}
     - {watch_title}: {watch_data}
-    - ระดับน้ำ: {wl_full_text}
-    - ระบายเขื่อน: {discharge_full_text}
+    - ระดับน้ำปัจจุบัน: {wl_full_text}
+    - ระบายเขื่อนปัจจุบัน: {discharge_full_text}
+    - 📊 ข้อมูลน้ำย้อนหลัง (วันที่เดียวกันของปีที่แล้ว): 
+{historical_water_text}
 
     กฎการเขียน:
     1. {watch_title}: {watch_rule}
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
     3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลที่ให้มา
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ระดับน้ำและเขื่อน: พูดแนวโน้มแบบธรรมชาติ ไม่ต้องพูดตัวเลขซ้ำ
+    5. ระดับน้ำและเขื่อน: ให้เล่าระดับน้ำปัจจุบันและแนวโน้มเทียบกับเมื่อวาน และ "ต้อง" หยิบสถานการณ์น้ำย้อนหลังของปีที่แล้ว (ถ้ามีข้อมูล) มาเปรียบเทียบให้ชาวบ้านเห็นภาพว่า ปีนี้เทียบกับปีที่แล้วในช่วงเวลาเดียวกันมันดีกว่า แย่กว่า หรือใกล้เคียงกัน (ไม่ต้องลอกมาทุกตัวเลข ให้เล่าสรุปรวมๆ ให้อ่านง่าย)
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
 
     🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
     {watch_icon} **{watch_title}:** [สรุปตาม {watch_rule}]
-    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำเป็นเมตร พร้อมแนวโน้มเทียบเมื่อวานถ้ามี]
-    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำ พร้อมแนวโน้มถ้ามี]
+    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และเปรียบเทียบกับภาพรวมระดับน้ำปีที่แล้ว]
+    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำปัจจุบัน และเปรียบเทียบกับการระบายปีที่แล้ว]
 
     📌 **สรุป:** [ทักทายตามวัน{thai_day_of_week} 1-2 บรรทัด]
     """
