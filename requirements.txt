@@ -5,3 +5,4 @@ beautifulsoup4
 playwright
 earthengine-api
 google-api-python-client
+openpyxl
