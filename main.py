@@ -85,8 +85,6 @@ def get_dist(lat1, lon1, lat2, lon2):
 
 # ─────────────────────────────────────────────
 # TMD ชุดที่ 1: ผลตรวจวัดและพยากรณ์อากาศ (Observation)
-# endpoint: https://data.tmd.go.th/api/Weather3Hours/v2/
-# ข้อมูลจริงจากสถานีตรวจอากาศทุก 3 ชั่วโมง
 # ─────────────────────────────────────────────
 def get_tmd_observation() -> dict:
     result = {'available': False}
@@ -863,7 +861,7 @@ def fetch_chao_phraya_dam_discharge():
     return None
 
 # ─────────────────────────────────────────────
-# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้ว (แบบยืดหยุ่น หาค่าใกล้เคียงที่สุด)
+# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้ว (แบบยืดหยุ่น หาค่าใกล้เคียงที่สุด ทนต่อหัวคอลัมน์เพี้ยน)
 # ─────────────────────────────────────────────
 def get_historical_water_data(target_date):
     file_paths = ['ข้อมูลน้ำอินทร์บุรี2568.xlsx', 'โพนางดำ.xlsx']
@@ -878,19 +876,31 @@ def get_historical_water_data(target_date):
             print(f"⚠️ ไม่สามารถอ่านไฟล์ {file_path} ได้: {e}")
             continue
             
-        station_name = "อินทร์บุรี" if "อินทร์" in file_path else "โพนางดำ" if "โพ" in file_path else "จุดวัด"
-        
-        closest_diff = None
-        best_record = None
+        station_name = "อินทร์บุรี" if "อินทร์" in file_path else "โพนางดำ"
+        all_station_data = [] 
         
         for sheet_name in wb.sheetnames:
             sheet = wb[sheet_name]
+            # อ่านหัวตาราง (header) จากแถวแรก
             headers = [cell.value for cell in sheet[1]]
             
-            date_col_idx = next((i for i, h in enumerate(headers) if h and 'วัน' in str(h)), None)
-            wl_col_idx = next((i for i, h in enumerate(headers) if h and str(h).strip() in ['ระดับน้ำ + ตลิ่ง', 'ระดับน้ำ(ม.รทก.)', 'ระดับน้ำ (ม.รทก.)']), None)
-            dis_col_idx = next((i for i, h in enumerate(headers) if h and 'ปริมาณน้ำปล่อย' in str(h)), None)
+            # ค้นหา index ของคอลัมน์แบบถึกทน (ลบช่องว่างทั้งหมดออก)
+            date_col_idx = None
+            wl_col_idx = None
+            dis_col_idx = None
             
+            for i, h in enumerate(headers):
+                if not h: continue
+                nh = str(h).replace(' ', '').replace('\n', '')
+                
+                if ('วันที่' in nh or 'วัน' in nh) and date_col_idx is None:
+                    date_col_idx = i
+                elif nh.startswith('ระดับน้ำ') and wl_col_idx is None:
+                    wl_col_idx = i
+                elif ('ปริมาณน้ำปล่อย' in nh or 'เขื่อน' in nh) and dis_col_idx is None:
+                    dis_col_idx = i
+            
+            # ถ้าคอลัมน์สำคัญไม่ครบให้ข้าม sheet นี้
             if date_col_idx is None or wl_col_idx is None or dis_col_idx is None:
                 continue
                 
@@ -902,41 +912,55 @@ def get_historical_water_data(target_date):
                 if isinstance(raw_date, datetime):
                     dt = raw_date
                 elif isinstance(raw_date, str):
-                    try:
-                        dt = datetime.strptime(raw_date, '%d/%m/%Y %H:%M')
-                    except:
+                    rd = str(raw_date).strip()
+                    for fmt in ['%d/%m/%Y %H:%M', '%d/%m/%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d/%m/%Y']:
                         try:
-                            dt = datetime.strptime(raw_date.split()[0], '%Y-%m-%d')
+                            dt = datetime.strptime(rd, fmt)
+                            break
                         except:
                             pass
+                    if not dt:
+                        try:
+                            dt = datetime.strptime(rd.split()[0], '%Y-%m-%d')
+                        except:
+                            try:
+                                dt = datetime.strptime(rd.split()[0], '%d/%m/%Y')
+                            except:
+                                pass
                             
+                # ถ้าเจอข้อมูลของปีที่แล้ว ให้เก็บเข้าลิสต์ไว้ทั้งหมดก่อน
                 if dt and dt.year == target_date.year:
-                    # ตัดเรื่อง Timezone ออกเพื่อเอามาลบกันหาจำนวนวันที่ห่างกัน
+                    wl_val = str(row[wl_col_idx]).split('/')[0].strip()
+                    dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
+                    if dis_val in ['None', 'nan', '']: dis_val = '-'
+                    
                     dt_naive = dt.replace(tzinfo=None)
                     target_naive = target_date.replace(tzinfo=None)
-                    diff = abs((target_naive - dt_naive).days)
+                    diff = abs((target_naive.date() - dt_naive.date()).days)
                     
-                    # ถ้าเจอวันที่ตรงเป๊ะ (diff == 0) ให้หยุดหาของสถานีนี้เลย
-                    if diff == 0:
-                        wl_val = str(row[wl_col_idx]).split('/')[0].strip()
-                        dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
-                        if dis_val in ['None', 'nan', '']: dis_val = '-'
-                        best_record = f"[{station_name}] (ตรงกับวันนี้ปีที่แล้ว) ระดับน้ำ {wl_val} ม. (ระบาย {dis_val} ลบ.ม./วินาที)"
-                        closest_diff = 0
-                        break
-                    
-                    # ถ้าไม่ตรงเป๊ะ ให้เก็บค่าที่ใกล้เคียงที่สุดไว้ (แต่ไม่ควรเกิน 20 วัน)
-                    elif diff <= 20:
-                        if closest_diff is None or diff < closest_diff:
-                            closest_diff = diff
-                            wl_val = str(row[wl_col_idx]).split('/')[0].strip()
-                            dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
-                            if dis_val in ['None', 'nan', '']: dis_val = '-'
-                            best_record = f"[{station_name}] (ข้อมูลใกล้เคียงวันที่ {dt.strftime('%d/%m/%Y')}) ระดับน้ำ {wl_val} ม. (ระบาย {dis_val} ลบ.ม./วินาที)"
+                    time_str = dt.strftime('%H:%M')
+                    if time_str == '00:00':
+                        time_str = '-'
+                        
+                    all_station_data.append({
+                        'diff': diff,
+                        'date_str': dt.strftime('%d/%m/%Y'),
+                        'time_str': time_str,
+                        'wl': wl_val,
+                        'dis': dis_val
+                    })
 
-        if best_record:
-            records.append(best_record)
-                    
+        if all_station_data:
+            # หาตัวที่ diff น้อยที่สุด (ใกล้เคียงวันนี้ที่สุด ไม่จำกัดจำนวนวัน)
+            best_match = min(all_station_data, key=lambda x: x['diff'])
+            
+            time_info = f" เวลา {best_match['time_str']} น." if best_match['time_str'] != '-' else ""
+            
+            if best_match['diff'] == 0:
+                 records.append(f"[{station_name}] (ตรงกับวันนี้ของปีที่แล้ว) ระดับน้ำ {best_match['wl']} ม. (ระบาย {best_match['dis']} ลบ.ม./วินาที)")
+            else:
+                 records.append(f"[{station_name}] (ดึงข้อมูลใกล้เคียงของวันที่ {best_match['date_str']}{time_info}) ระดับน้ำ {best_match['wl']} ม. (ระบาย {best_match['dis']} ลบ.ม./วินาที)")
+
     if records:
         return "\n".join(records)
     return "ไม่มีบันทึกข้อมูลของปีที่แล้วในช่วงนี้ (สถานการณ์น้ำน่าจะปกติ)"
@@ -1037,7 +1061,7 @@ if __name__ == "__main__":
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
     3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลที่ให้มา
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ระดับน้ำและเขื่อน: ให้เล่าระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และหยิบสถานการณ์น้ำย้อนหลัง (ถ้ามี) มาเปรียบเทียบให้ชาวบ้านเห็นภาพว่าปีนี้กับช่วงเวลาไล่เลี่ยกันของปีที่แล้วต่างกันแค่ไหน (เล่าสรุปรวมๆ ให้อ่านง่าย)
+    5. ระดับน้ำและเขื่อน: ให้เล่าระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และหยิบสถานการณ์น้ำย้อนหลัง (ถ้ามี) มาเปรียบเทียบให้ชาวบ้านเห็นภาพว่าปีนี้กับช่วงเวลาไล่เลี่ยกันของปีที่แล้วต่างกันแค่ไหน (เล่าสรุปรวมๆ ให้อ่านง่าย ถ้าเป็นข้อมูลใกล้วัน ให้บอกให้รู้ด้วยว่าดึงของวันไหนมาเทียบ)
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
