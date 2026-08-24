@@ -867,7 +867,7 @@ def get_historical_water_data(target_date):
     file_paths = ['ข้อมูลน้ำอินทร์บุรี2568.xlsx', 'โพนางดำ.xlsx']
     records = []
     
-    # 1. ถอยหลังไป 1 ปีที่แท้จริง เพื่อกันบวกลบวันผิดเพี้ยน
+    # ถอยหลังไป 1 ปีที่แท้จริง เพื่อกันบวกลบวันผิดเพี้ยน
     try:
         target_last_year = target_date.replace(year=target_date.year - 1, tzinfo=None)
     except ValueError:
@@ -941,10 +941,10 @@ def get_historical_water_data(target_date):
                     
                     dt_naive = dt.replace(tzinfo=None)
                     
-                    # 1. หาระยะห่างของ "วันที่"
+                    # 1. หาระยะห่างของ "วันที่" (Date difference in days)
                     date_diff = abs((target_last_year.date() - dt_naive.date()).days)
                     
-                    # 2. หาระยะห่างของ "เวลา" แบบเป๊ะๆ
+                    # 2. หาระยะห่างของ "เวลา" (Time difference in seconds on a dummy date)
                     dummy_target = datetime(2000, 1, 1, target_last_year.hour, target_last_year.minute)
                     dummy_record = datetime(2000, 1, 1, dt_naive.hour, dt_naive.minute)
                     time_diff_sec = abs((dummy_target - dummy_record).total_seconds())
