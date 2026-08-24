@@ -861,11 +861,16 @@ def fetch_chao_phraya_dam_discharge():
     return None
 
 # ─────────────────────────────────────────────
-# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้ว (แบบยืดหยุ่น หาค่าใกล้เคียงที่สุด ทนต่อหัวคอลัมน์เพี้ยน)
+# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้ว (เป๊ะทั้ง "วันที่" และ "เวลา")
 # ─────────────────────────────────────────────
 def get_historical_water_data(target_date):
     file_paths = ['ข้อมูลน้ำอินทร์บุรี2568.xlsx', 'โพนางดำ.xlsx']
     records = []
+    
+    target_naive = target_date.replace(tzinfo=None)
+    
+    THAI_MONTHS_LOCAL = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
+                   "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
     
     for file_path in file_paths:
         if not os.path.exists(file_path):
@@ -881,10 +886,8 @@ def get_historical_water_data(target_date):
         
         for sheet_name in wb.sheetnames:
             sheet = wb[sheet_name]
-            # อ่านหัวตาราง (header) จากแถวแรก
             headers = [cell.value for cell in sheet[1]]
             
-            # ค้นหา index ของคอลัมน์แบบถึกทน (ลบช่องว่างทั้งหมดออก)
             date_col_idx = None
             wl_col_idx = None
             dis_col_idx = None
@@ -892,7 +895,6 @@ def get_historical_water_data(target_date):
             for i, h in enumerate(headers):
                 if not h: continue
                 nh = str(h).replace(' ', '').replace('\n', '')
-                
                 if ('วันที่' in nh or 'วัน' in nh) and date_col_idx is None:
                     date_col_idx = i
                 elif nh.startswith('ระดับน้ำ') and wl_col_idx is None:
@@ -900,7 +902,6 @@ def get_historical_water_data(target_date):
                 elif ('ปริมาณน้ำปล่อย' in nh or 'เขื่อน' in nh) and dis_col_idx is None:
                     dis_col_idx = i
             
-            # ถ้าคอลัมน์สำคัญไม่ครบให้ข้าม sheet นี้
             if date_col_idx is None or wl_col_idx is None or dis_col_idx is None:
                 continue
                 
@@ -928,42 +929,51 @@ def get_historical_water_data(target_date):
                             except:
                                 pass
                             
-                # ถ้าเจอข้อมูลของปีที่แล้ว ให้เก็บเข้าลิสต์ไว้ทั้งหมดก่อน
-                if dt and dt.year == target_date.year:
+                # เช็คว่าเป็นข้อมูลของปีที่แล้วหรือไม่
+                if dt and dt.year == (target_date.year - 1):
                     wl_val = str(row[wl_col_idx]).split('/')[0].strip()
                     dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
                     if dis_val in ['None', 'nan', '']: dis_val = '-'
                     
                     dt_naive = dt.replace(tzinfo=None)
-                    target_naive = target_date.replace(tzinfo=None)
-                    diff = abs((target_naive.date() - dt_naive.date()).days)
                     
-                    time_str = dt.strftime('%H:%M')
-                    if time_str == '00:00':
-                        time_str = '-'
-                        
+                    # 1. หาระยะห่างของ "วันที่"
+                    date_diff = abs((target_naive.date() - dt_naive.date()).days)
+                    
+                    # 2. หาระยะห่างของ "เวลา"
+                    dummy_target = datetime(2000, 1, 1, target_naive.hour, target_naive.minute)
+                    dummy_record = datetime(2000, 1, 1, dt_naive.hour, dt_naive.minute)
+                    time_diff_sec = abs((dummy_target - dummy_record).total_seconds())
+                    
                     all_station_data.append({
-                        'diff': diff,
-                        'date_str': dt.strftime('%d/%m/%Y'),
-                        'time_str': time_str,
+                        'date_diff': date_diff,
+                        'time_diff': time_diff_sec,
+                        'dt': dt_naive,
                         'wl': wl_val,
                         'dis': dis_val
                     })
 
         if all_station_data:
-            # หาตัวที่ diff น้อยที่สุด (ใกล้เคียงวันนี้ที่สุด ไม่จำกัดจำนวนวัน)
-            best_match = min(all_station_data, key=lambda x: x['diff'])
+            # หากลุ่มข้อมูลที่ "วันที่" ใกล้กับเป้าหมายมากที่สุดก่อน
+            min_date_diff = min(x['date_diff'] for x in all_station_data)
+            closest_date_records = [x for x in all_station_data if x['date_diff'] == min_date_diff]
             
-            time_info = f" เวลา {best_match['time_str']} น." if best_match['time_str'] != '-' else ""
+            # จากนั้นในกลุ่มวันที่เดียวกัน ให้เลือก "เวลา" ที่ใกล้เคียงมากที่สุด
+            best = min(closest_date_records, key=lambda x: x['time_diff'])
+            b_dt = best['dt']
             
-            if best_match['diff'] == 0:
-                 records.append(f"[{station_name}] (ตรงกับวันนี้ของปีที่แล้ว) ระดับน้ำ {best_match['wl']} ม. (ระบาย {best_match['dis']} ลบ.ม./วินาที)")
+            # แปลงเป็นปี พ.ศ. ให้ชัดเจน (เช่น 2568) เพื่อป้องกัน AI แปลงปีผิดเพี้ยน
+            thai_date_str = f"{b_dt.day} {THAI_MONTHS_LOCAL[b_dt.month - 1]} {b_dt.year + 543}"
+            t_str = b_dt.strftime('%H:%M')
+            
+            if best['date_diff'] == 0:
+                 records.append(f"📌 {station_name} ปีที่แล้ว (ตรงกับวันนี้ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
             else:
-                 records.append(f"[{station_name}] (ดึงข้อมูลใกล้เคียงของวันที่ {best_match['date_str']}{time_info}) ระดับน้ำ {best_match['wl']} ม. (ระบาย {best_match['dis']} ลบ.ม./วินาที)")
+                 records.append(f"📌 {station_name} ปีที่แล้ว (ดึงข้อมูลใกล้เคียง วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
 
     if records:
         return "\n".join(records)
-    return "ไม่มีบันทึกข้อมูลของปีที่แล้วในช่วงนี้ (สถานการณ์น้ำน่าจะปกติ)"
+    return "ไม่มีบันทึกข้อมูลของปีที่แล้ว"
 
 
 # ─────────────────────────────────────────────
@@ -1038,38 +1048,34 @@ if __name__ == "__main__":
                               if discharge_compare_text else ""))
 
     # ── ดึงข้อมูลน้ำย้อนหลัง 1 ปี ────────
-    try:
-        last_year_date = datetime(now.year - 1, now.month, now.day)
-    except ValueError:
-        last_year_date = datetime(now.year - 1, now.month, now.day - 1)
-        
-    historical_water_text = get_historical_water_data(last_year_date)
+    historical_water_text = get_historical_water_data(now)
 
     prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
-    ข้อมูลดิบ: วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}
+    ข้อมูลดิบปัจจุบัน: วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
     - ฝุ่น PM 2.5: {pm25_instruction}
     - {watch_title}: {watch_data}
-    - ระดับน้ำปัจจุบัน: {wl_full_text}
-    - ระบายเขื่อนปัจจุบัน: {discharge_full_text}
-    - 📊 ข้อมูลน้ำย้อนหลัง: 
+    - ระดับน้ำปัจจุบัน (ปี {thai_year}): {wl_full_text}
+    - ระบายเขื่อนปัจจุบัน (ปี {thai_year}): {discharge_full_text}
+    
+    📊 ข้อมูลน้ำย้อนหลัง (เปรียบเทียบช่วงเวลาเดียวกันของปีที่แล้ว): 
     {historical_water_text}
 
     กฎการเขียน:
     1. {watch_title}: {watch_rule}
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
-    3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลที่ให้มา
+    3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลปัจจุบันที่ให้มา
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ระดับน้ำและเขื่อน: ให้เล่าระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และหยิบสถานการณ์น้ำย้อนหลัง (ถ้ามี) มาเปรียบเทียบให้ชาวบ้านเห็นภาพว่าปีนี้กับช่วงเวลาไล่เลี่ยกันของปีที่แล้วต่างกันแค่ไหน (เล่าสรุปรวมๆ ให้อ่านง่าย ถ้าเป็นข้อมูลใกล้วัน ให้บอกให้รู้ด้วยว่าดึงของวันไหนมาเทียบ)
+    5. ระดับน้ำและเขื่อน: **บังคับ** ให้เล่าเปรียบเทียบข้อมูลระดับน้ำปัจจุบันกับ "ข้อมูลน้ำย้อนหลัง" ที่แนบให้ โดยต้องระบุให้ชัดเจนว่าปีที่แล้ววันที่เท่าไหร่ เวลาไหน (ตามข้อมูลย้อนหลังที่ให้ไป) และระดับน้ำ/การระบายต่างกันอย่างไร
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
 
     🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
     {watch_icon} **{watch_title}:** [สรุปตาม {watch_rule}]
-    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และเปรียบเทียบกับภาพรวมระดับน้ำปีที่แล้วแบบเนียนๆ]
-    🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** [สรุปการระบายน้ำปัจจุบัน และเปรียบเทียบกับการระบายปีที่แล้วแบบเนียนๆ]
+    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และหยิบข้อมูลย้อนหลังของอินทร์บุรีมาเทียบแบบชัดเจน พร้อมระบุวัน/เวลาของปีที่แล้วด้วย]
+    🛑 **ระบายน้ำเขื่อนเจ้าพระยาและโพนางดำ:** [สรุปการระบายน้ำปัจจุบัน เทียบกับเขื่อนปีที่แล้วแบบชัดเจน (ถ้ามีข้อมูลย้อนหลังของโพนางดำ ให้แทรกพูดถึงสั้นๆ ด้วยเพื่อให้ชาวบ้านเห็นภาพรวมพื้นที่ใกล้เคียงว่าปีที่แล้วเป็นอย่างไร)]
 
     📌 **สรุป:** [ทักทายตามวัน{thai_day_of_week} 1-2 บรรทัด]
     """
