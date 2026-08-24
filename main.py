@@ -867,8 +867,12 @@ def get_historical_water_data(target_date):
     file_paths = ['ข้อมูลน้ำอินทร์บุรี2568.xlsx', 'โพนางดำ.xlsx']
     records = []
     
-    target_naive = target_date.replace(tzinfo=None)
-    
+    # 1. ถอยหลังไป 1 ปีที่แท้จริง เพื่อกันบวกลบวันผิดเพี้ยน
+    try:
+        target_last_year = target_date.replace(year=target_date.year - 1, tzinfo=None)
+    except ValueError:
+        target_last_year = target_date.replace(year=target_date.year - 1, day=target_date.day - 1, tzinfo=None)
+        
     THAI_MONTHS_LOCAL = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
                    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
     
@@ -929,8 +933,8 @@ def get_historical_water_data(target_date):
                             except:
                                 pass
                             
-                # เช็คว่าเป็นข้อมูลของปีที่แล้วหรือไม่
-                if dt and dt.year == (target_date.year - 1):
+                # เช็คว่าเป็นข้อมูลของปีที่แล้ว (เทียบกับ target_last_year)
+                if dt and dt.year == target_last_year.year:
                     wl_val = str(row[wl_col_idx]).split('/')[0].strip()
                     dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
                     if dis_val in ['None', 'nan', '']: dis_val = '-'
@@ -938,10 +942,10 @@ def get_historical_water_data(target_date):
                     dt_naive = dt.replace(tzinfo=None)
                     
                     # 1. หาระยะห่างของ "วันที่"
-                    date_diff = abs((target_naive.date() - dt_naive.date()).days)
+                    date_diff = abs((target_last_year.date() - dt_naive.date()).days)
                     
-                    # 2. หาระยะห่างของ "เวลา"
-                    dummy_target = datetime(2000, 1, 1, target_naive.hour, target_naive.minute)
+                    # 2. หาระยะห่างของ "เวลา" แบบเป๊ะๆ
+                    dummy_target = datetime(2000, 1, 1, target_last_year.hour, target_last_year.minute)
                     dummy_record = datetime(2000, 1, 1, dt_naive.hour, dt_naive.minute)
                     time_diff_sec = abs((dummy_target - dummy_record).total_seconds())
                     
@@ -954,22 +958,22 @@ def get_historical_water_data(target_date):
                     })
 
         if all_station_data:
-            # หากลุ่มข้อมูลที่ "วันที่" ใกล้กับเป้าหมายมากที่สุดก่อน
+            # 1. หากลุ่มข้อมูลที่ "วันที่" ใกล้กับเป้าหมายมากที่สุดก่อน
             min_date_diff = min(x['date_diff'] for x in all_station_data)
             closest_date_records = [x for x in all_station_data if x['date_diff'] == min_date_diff]
             
-            # จากนั้นในกลุ่มวันที่เดียวกัน ให้เลือก "เวลา" ที่ใกล้เคียงมากที่สุด
+            # 2. จากนั้นในกลุ่มวันที่เดียวกัน ให้เลือก "เวลา" ที่ใกล้เคียงมากที่สุด
             best = min(closest_date_records, key=lambda x: x['time_diff'])
             b_dt = best['dt']
             
-            # แปลงเป็นปี พ.ศ. ให้ชัดเจน (เช่น 2568) เพื่อป้องกัน AI แปลงปีผิดเพี้ยน
+            # 3. แปลงเป็นปี พ.ศ. ให้ชัดเจน (เช่น 2568) เพื่อป้องกัน AI แปลงปีผิดเพี้ยน
             thai_date_str = f"{b_dt.day} {THAI_MONTHS_LOCAL[b_dt.month - 1]} {b_dt.year + 543}"
             t_str = b_dt.strftime('%H:%M')
             
             if best['date_diff'] == 0:
-                 records.append(f"📌 {station_name} ปีที่แล้ว (ตรงกับวันนี้ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
+                 records.append(f"📌 {station_name} ข้อมูลปีที่แล้ว (ตรงกับวันนี้ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
             else:
-                 records.append(f"📌 {station_name} ปีที่แล้ว (ดึงข้อมูลใกล้เคียง วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
+                 records.append(f"📌 {station_name} ข้อมูลปีที่แล้ว (ดึงวันใกล้เคียงคือ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
 
     if records:
         return "\n".join(records)
@@ -1067,7 +1071,7 @@ if __name__ == "__main__":
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
     3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลปัจจุบันที่ให้มา
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ระดับน้ำและเขื่อน: **บังคับ** ให้เล่าเปรียบเทียบข้อมูลระดับน้ำปัจจุบันกับ "ข้อมูลน้ำย้อนหลัง" ที่แนบให้ โดยต้องระบุให้ชัดเจนว่าปีที่แล้ววันที่เท่าไหร่ เวลาไหน (ตามข้อมูลย้อนหลังที่ให้ไป) และระดับน้ำ/การระบายต่างกันอย่างไร
+    5. ระดับน้ำและเขื่อน: **บังคับ** ให้เล่าเปรียบเทียบข้อมูลระดับน้ำปัจจุบันกับ "ข้อมูลน้ำย้อนหลัง" ที่แนบให้ โดยต้องระบุให้ชัดเจนว่าปีที่แล้ววันที่เท่าไหร่ เวลาไหน (ตามข้อมูลย้อนหลังที่ให้ไป) และระดับน้ำ/การระบายปีนี้กับปีที่แล้วต่างกันอย่างไร
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
