@@ -6,6 +6,7 @@ import requests
 import math
 import time
 import openpyxl
+import csv
 from datetime import datetime, timedelta, timezone
 import pytz
 import ee
@@ -609,21 +610,18 @@ def get_accurate_pm25(return_meta=False):
             f"https://pm25.gistda.or.th/rest/getPM25byLocation"
             f"?lat={PM_LAT}&lng={PM_LON}&t={int(time.time())}",
             headers=headers, timeout=15, verify=False)
-        print(f"GISTDA HTTP: {res.status_code}")
         if res.status_code == 200:
             payload = res.json()
             pm = _safe_float((payload.get('data', payload)).get('pm25'))
-            print(f"GISTDA PM2.5: {pm}")
             if pm is not None:
                 gistda_value = pm
     except Exception as e:
-        print(f"⚠️ GISTDA error: {e}")
+        pass
 
     try:
         res = requests.get(
             f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}",
             headers=headers, timeout=15, verify=False)
-        print(f"Air4Thai HTTP: {res.status_code}")
         if res.status_code == 200:
             nearby = []
             for st in res.json().get('stations', []):
@@ -651,12 +649,8 @@ def get_accurate_pm25(return_meta=False):
                     'station': name,
                 })
             nearby.sort()
-            print(
-                f"Air4Thai สถานีใน {WIDE_KM} กม.: "
-                f"{[(f'{d:.1f}km', f'{a//60}m', n, v) for d,a,n,v in nearby[:5]]}"
-            )
     except Exception as e:
-        print(f"⚠️ Air4Thai error: {e}")
+        pass
 
     WAQI_TOKEN = os.environ.get("WAQI_TOKEN")
     if WAQI_TOKEN:
@@ -665,46 +659,35 @@ def get_accurate_pm25(return_meta=False):
                 res = requests.get(
                     f"https://api.waqi.info/feed/@{sid}/?token={WAQI_TOKEN}",
                     timeout=15)
-                print(f"WAQI @{sid} HTTP: {res.status_code}")
                 if res.status_code == 200:
                     d = res.json()
                     if d.get('status') == 'ok':
                         iaqi = d['data'].get('iaqi', {})
                         pm = _safe_float((iaqi.get('pm25') or {}).get('v'))
-                        sname = d['data'].get('city', {}).get('name', sid)
-                        print(f"WAQI @{sid} ({sname}) PM2.5: {pm}")
                         if pm is not None:
                             waqi_value = pm
                             break
             except Exception as e:
-                print(f"⚠️ WAQI @{sid} error: {e}")
+                pass
 
         if waqi_value is None:
             try:
                 res = requests.get(
                     f"https://api.waqi.info/feed/geo:{PM_LAT};{PM_LON}/?token={WAQI_TOKEN}",
                     timeout=15)
-                print(f"WAQI geo HTTP: {res.status_code}")
                 if res.status_code == 200:
                     d = res.json()
                     if d.get('status') == 'ok':
                         geo = d['data'].get('city', {}).get('geo', [])
-                        sname = d['data'].get('city', {}).get('name', '?')
                         if len(geo) == 2:
                             dist = get_dist(PM_LAT, PM_LON, float(geo[0]), float(geo[1]))
-                            print(f"WAQI geo: {sname} ห่าง {dist:.1f} กม.")
                             if dist <= 60:
                                 iaqi = d['data'].get('iaqi', {})
                                 pm = _safe_float((iaqi.get('pm25') or {}).get('v'))
-                                print(f"WAQI geo PM2.5: {pm}")
                                 if pm is not None:
                                     waqi_value = pm
-                            else:
-                                print(f"⚠️ WAQI geo: ไกลเกิน ({dist:.1f} กม.) ข้าม")
             except Exception as e:
-                print(f"⚠️ WAQI geo error: {e}")
-    else:
-        print("⚠️ WAQI_TOKEN ไม่พบ")
+                pass
 
     OWM_API_KEY = os.environ.get("OWM_API_KEY")
     if OWM_API_KEY:
@@ -713,17 +696,13 @@ def get_accurate_pm25(return_meta=False):
                 f"http://api.openweathermap.org/data/2.5/air_pollution"
                 f"?lat={PM_LAT}&lon={PM_LON}&appid={OWM_API_KEY}",
                 timeout=15)
-            print(f"OWM HTTP: {res.status_code}")
             if res.status_code == 200:
                 comp = res.json()['list'][0]['components']
                 pm = _safe_float(comp.get('pm2_5'))
-                print(f"OWM PM2.5: {pm}")
                 if pm is not None:
                     owm_value = pm
         except Exception as e:
-            print(f"⚠️ OWM error: {e}")
-    else:
-        print("⚠️ OWM_API_KEY ไม่พบ")
+            pass
 
     try:
         res = requests.get(
@@ -735,11 +714,10 @@ def get_accurate_pm25(return_meta=False):
         data = res.json()
         if 'current' in data:
             pm = _safe_float(data['current'].get('pm2_5'))
-            print(f"Open-Meteo PM2.5: {pm}")
             if pm is not None:
                 openmeteo_value = pm
     except Exception as e:
-        print(f"⚠️ Open-Meteo error: {e}")
+        pass
 
 
     strict = [r for r in air4thai_rows if r['distance'] <= STRICT_KM and r['age'] <= STRICT_AGE]
@@ -748,7 +726,6 @@ def get_accurate_pm25(return_meta=False):
         pm = _weighted_pm25(strict[:3])
         if pm is not None:
             selected_source = "Air4Thai ใกล้สุด ≤20 กม./≤1 ชม."
-            print(f"✅ ใช้ {selected_source}: {pm:.1f}")
             return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
     wide = [r for r in air4thai_rows if r['distance'] <= WIDE_KM and r['age'] <= WIDE_AGE]
@@ -757,24 +734,20 @@ def get_accurate_pm25(return_meta=False):
         pm = _weighted_pm25(wide[:3])
         if pm is not None:
             selected_source = "Air4Thai รอบกว้าง ≤50 กม./≤3 ชม."
-            print(f"✅ ใช้ {selected_source}: {pm:.1f}")
             return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
     if waqi_value is not None:
         selected_source = "WAQI สถานีใกล้เคียง"
-        print(f"✅ ใช้ {selected_source}: {waqi_value:.1f}")
         return ({'pm25': f"{waqi_value:.1f}", 'source': selected_source} if return_meta else f"{waqi_value:.1f}")
 
     ceiling_candidates = [v for v in [gistda_value, openmeteo_value] if v is not None]
     if ceiling_candidates:
         pm = max(ceiling_candidates)
         selected_source = "เพดานคัดกรอง GISTDA/Open-Meteo"
-        print(f"✅ ใช้ {selected_source}: {pm:.1f} จาก {ceiling_candidates}")
         return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
     if owm_value is not None:
         selected_source = "OpenWeatherMap fallback"
-        print(f"✅ ใช้ {selected_source}: {owm_value:.1f}")
         return ({'pm25': f"{owm_value:.1f}", 'source': selected_source} if return_meta else f"{owm_value:.1f}")
 
     stale = [r for r in air4thai_rows if r['distance'] <= WIDE_KM]
@@ -783,10 +756,8 @@ def get_accurate_pm25(return_meta=False):
         pm = _weighted_pm25(stale[:3])
         if pm is not None:
             selected_source = "Air4Thai stale ≤50 กม."
-            print(f"⚠️ ใช้ {selected_source}: {pm:.1f}")
             return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
-    print("❌ ทุกแหล่งล้มเหลว → N/A")
     return ({'pm25': 'N/A', 'source': 'ทุกแหล่งล้มเหลว'} if return_meta else "N/A")
 
 def get_weather():
@@ -861,13 +832,34 @@ def fetch_chao_phraya_dam_discharge():
     return None
 
 # ─────────────────────────────────────────────
-# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้ว (เป๊ะทั้ง "วันที่" และ "เวลา")
+# ระบบบันทึกข้อมูลรายวัน (Save to CSV)
+# ─────────────────────────────────────────────
+def save_current_water_data(wl, discharge):
+    csv_file = "history_water.csv"
+    file_exists = os.path.isfile(csv_file)
+    try:
+        with open(csv_file, mode='a', newline='', encoding='utf-8') as f:
+            writer = csv.writer(f)
+            if not file_exists:
+                writer.writerow(["Date", "Time", "Station", "WaterLevel", "Discharge"])
+            
+            date_str_csv = now.strftime('%Y-%m-%d')
+            time_str_csv = now.strftime('%H:%M')
+            wl_val = wl if wl is not None else "-"
+            dis_val = discharge if discharge is not None else "-"
+            
+            writer.writerow([date_str_csv, time_str_csv, "อินทร์บุรี", wl_val, dis_val])
+    except Exception as e:
+        print(f"⚠️ บันทึกข้อมูลลงประวัติรายวันไม่ได้: {e}")
+
+# ─────────────────────────────────────────────
+# ดึงข้อมูลประวัติย้อนหลังของปีที่แล้ว (ดึงจากทั้ง Excel และ CSV ของบอท)
 # ─────────────────────────────────────────────
 def get_historical_water_data(target_date):
     file_paths = ['ข้อมูลน้ำอินทร์บุรี2568.xlsx', 'โพนางดำ.xlsx']
     records = []
     
-    # ถอยหลังไป 1 ปีที่แท้จริง เพื่อกันบวกลบวันผิดเพี้ยน
+    # 1. ถอยหลังไป 1 ปีที่แท้จริง
     try:
         target_last_year = target_date.replace(year=target_date.year - 1, tzinfo=None)
     except ValueError:
@@ -876,104 +868,120 @@ def get_historical_water_data(target_date):
     THAI_MONTHS_LOCAL = ["มกราคม", "กุมภาพันธ์", "มีนาคม", "เมษายน", "พฤษภาคม", "มิถุนายน",
                    "กรกฎาคม", "สิงหาคม", "กันยายน", "ตุลาคม", "พฤศจิกายน", "ธันวาคม"]
     
+    station_data_pool = {"อินทร์บุรี": [], "โพนางดำ": []}
+    
+    # --- ส่วนที่ 1: ดึงจากไฟล์ Excel ---
     for file_path in file_paths:
-        if not os.path.exists(file_path):
-            continue
+        if not os.path.exists(file_path): continue
         try:
             wb = openpyxl.load_workbook(file_path, data_only=True)
         except Exception as e:
-            print(f"⚠️ ไม่สามารถอ่านไฟล์ {file_path} ได้: {e}")
             continue
             
         station_name = "อินทร์บุรี" if "อินทร์" in file_path else "โพนางดำ"
-        all_station_data = [] 
         
         for sheet_name in wb.sheetnames:
             sheet = wb[sheet_name]
             headers = [cell.value for cell in sheet[1]]
             
-            date_col_idx = None
-            wl_col_idx = None
-            dis_col_idx = None
-            
+            date_col_idx, wl_col_idx, dis_col_idx = None, None, None
             for i, h in enumerate(headers):
                 if not h: continue
                 nh = str(h).replace(' ', '').replace('\n', '')
-                if ('วันที่' in nh or 'วัน' in nh) and date_col_idx is None:
-                    date_col_idx = i
-                elif nh.startswith('ระดับน้ำ') and wl_col_idx is None:
-                    wl_col_idx = i
-                elif ('ปริมาณน้ำปล่อย' in nh or 'เขื่อน' in nh) and dis_col_idx is None:
-                    dis_col_idx = i
+                if ('วันที่' in nh or 'วัน' in nh) and date_col_idx is None: date_col_idx = i
+                elif nh.startswith('ระดับน้ำ') and wl_col_idx is None: wl_col_idx = i
+                elif ('ปริมาณน้ำปล่อย' in nh or 'เขื่อน' in nh) and dis_col_idx is None: dis_col_idx = i
             
-            if date_col_idx is None or wl_col_idx is None or dis_col_idx is None:
-                continue
+            if date_col_idx is None or wl_col_idx is None or dis_col_idx is None: continue
                 
             for row in sheet.iter_rows(min_row=2, values_only=True):
                 raw_date = row[date_col_idx]
                 if not raw_date: continue
                 
                 dt = None
-                if isinstance(raw_date, datetime):
-                    dt = raw_date
+                if isinstance(raw_date, datetime): dt = raw_date
                 elif isinstance(raw_date, str):
                     rd = str(raw_date).strip()
                     for fmt in ['%d/%m/%Y %H:%M', '%d/%m/%Y %H:%M:%S', '%Y-%m-%d %H:%M:%S', '%Y-%m-%d', '%d/%m/%Y']:
                         try:
                             dt = datetime.strptime(rd, fmt)
                             break
-                        except:
-                            pass
+                        except: pass
                     if not dt:
-                        try:
-                            dt = datetime.strptime(rd.split()[0], '%Y-%m-%d')
+                        try: dt = datetime.strptime(rd.split()[0], '%Y-%m-%d')
                         except:
-                            try:
-                                dt = datetime.strptime(rd.split()[0], '%d/%m/%Y')
-                            except:
-                                pass
+                            try: dt = datetime.strptime(rd.split()[0], '%d/%m/%Y')
+                            except: pass
                             
-                # เช็คว่าเป็นข้อมูลของปีที่แล้ว (เทียบกับ target_last_year)
                 if dt and dt.year == target_last_year.year:
                     wl_val = str(row[wl_col_idx]).split('/')[0].strip()
                     dis_val = str(row[dis_col_idx]).replace('.0', '').strip()
                     if dis_val in ['None', 'nan', '']: dis_val = '-'
-                    
                     dt_naive = dt.replace(tzinfo=None)
                     
-                    # 1. หาระยะห่างของ "วันที่" (Date difference in days)
                     date_diff = abs((target_last_year.date() - dt_naive.date()).days)
-                    
-                    # 2. หาระยะห่างของ "เวลา" (Time difference in seconds on a dummy date)
                     dummy_target = datetime(2000, 1, 1, target_last_year.hour, target_last_year.minute)
                     dummy_record = datetime(2000, 1, 1, dt_naive.hour, dt_naive.minute)
                     time_diff_sec = abs((dummy_target - dummy_record).total_seconds())
                     
-                    all_station_data.append({
-                        'date_diff': date_diff,
-                        'time_diff': time_diff_sec,
-                        'dt': dt_naive,
-                        'wl': wl_val,
-                        'dis': dis_val
+                    station_data_pool[station_name].append({
+                        'date_diff': date_diff, 'time_diff': time_diff_sec,
+                        'dt': dt_naive, 'wl': wl_val, 'dis': dis_val
                     })
 
-        if all_station_data:
-            # 1. หากลุ่มข้อมูลที่ "วันที่" ใกล้กับเป้าหมายมากที่สุดก่อน
-            min_date_diff = min(x['date_diff'] for x in all_station_data)
-            closest_date_records = [x for x in all_station_data if x['date_diff'] == min_date_diff]
-            
-            # 2. จากนั้นในกลุ่มวันที่เดียวกัน ให้เลือก "เวลา" ที่ใกล้เคียงมากที่สุด
-            best = min(closest_date_records, key=lambda x: x['time_diff'])
-            b_dt = best['dt']
-            
-            # 3. แปลงเป็นปี พ.ศ. ให้ชัดเจน (เช่น 2568) เพื่อป้องกัน AI แปลงปีผิดเพี้ยน
-            thai_date_str = f"{b_dt.day} {THAI_MONTHS_LOCAL[b_dt.month - 1]} {b_dt.year + 543}"
-            t_str = b_dt.strftime('%H:%M')
-            
-            if best['date_diff'] == 0:
-                 records.append(f"📌 {station_name} ข้อมูลปีที่แล้ว (ตรงกับวันนี้ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
-            else:
-                 records.append(f"📌 {station_name} ข้อมูลปีที่แล้ว (ดึงวันใกล้เคียงคือ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
+    # --- ส่วนที่ 2: ดึงจากไฟล์ CSV (ที่บอทสะสมไว้เอง) ---
+    csv_file = "history_water.csv"
+    if os.path.exists(csv_file):
+        try:
+            with open(csv_file, mode='r', encoding='utf-8') as f:
+                reader = csv.DictReader(f)
+                for row in reader:
+                    d_str = row.get("Date", "").strip()
+                    t_str = row.get("Time", "").strip()
+                    s_name = row.get("Station", "").strip()
+                    w_val = row.get("WaterLevel", "").strip()
+                    d_val = row.get("Discharge", "").strip()
+                    
+                    if not d_str or s_name not in station_data_pool: continue
+                    
+                    try: dt = datetime.strptime(f"{d_str} {t_str}", "%Y-%m-%d %H:%M")
+                    except:
+                        try: dt = datetime.strptime(d_str, "%Y-%m-%d")
+                        except: continue
+                        
+                    if dt.year == target_last_year.year:
+                        date_diff = abs((target_last_year.date() - dt.date()).days)
+                        dummy_target = datetime(2000, 1, 1, target_last_year.hour, target_last_year.minute)
+                        dummy_record = datetime(2000, 1, 1, dt.hour, dt.minute)
+                        time_diff_sec = abs((dummy_target - dummy_record).total_seconds())
+                        
+                        station_data_pool[s_name].append({
+                            'date_diff': date_diff, 'time_diff': time_diff_sec,
+                            'dt': dt, 'wl': w_val, 'dis': d_val
+                        })
+        except Exception as e:
+            print(f"⚠️ ไม่สามารถอ่าน {csv_file} ได้: {e}")
+
+    # --- ส่วนที่ 3: เลือกข้อมูลที่ใกล้เคียง วัน และ เวลา ที่สุด ---
+    for st_name, data_list in station_data_pool.items():
+        if not data_list: continue
+        
+        # 1. หาระยะห่างของ "วันที่" ที่ใกล้ที่สุด
+        min_date_diff = min(x['date_diff'] for x in data_list)
+        closest_date_records = [x for x in data_list if x['date_diff'] == min_date_diff]
+        
+        # 2. จากกลุ่มวันที่ใกล้ที่สุด ให้เลือก "เวลา" ที่ใกล้เคียงมากที่สุด
+        best = min(closest_date_records, key=lambda x: x['time_diff'])
+        b_dt = best['dt']
+        
+        # 3. แปลงเป็นปี พ.ศ. ให้ชัดเจน
+        thai_date_str = f"{b_dt.day} {THAI_MONTHS_LOCAL[b_dt.month - 1]} {b_dt.year + 543}"
+        t_str = b_dt.strftime('%H:%M')
+        
+        if best['date_diff'] == 0:
+             records.append(f"📌 {st_name} ปีที่แล้ว (ตรงกับวันนี้ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
+        else:
+             records.append(f"📌 {st_name} ปีที่แล้ว (ข้อมูลใกล้เคียง วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
 
     if records:
         return "\n".join(records)
@@ -997,6 +1005,9 @@ if __name__ == "__main__":
     wl, bank_level = get_inburi_data()
     discharge      = fetch_chao_phraya_dam_discharge()
     hotspots       = get_hotspots()
+    
+    # ── สั่งเก็บบันทึกข้อมูลลง CSV ของวันนี้ ────────
+    save_current_water_data(wl, discharge)
 
     wl_compare_text        = build_compare_text(wl,       prev_wl,       "ม.", "ระดับน้ำ")
     discharge_compare_text = build_compare_text(discharge, prev_discharge, "ลบ.ม./วินาที", "การระบาย")
@@ -1071,7 +1082,7 @@ if __name__ == "__main__":
     2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
     3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลปัจจุบันที่ให้มา
     4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
-    5. ระดับน้ำและเขื่อน: **บังคับ** ให้เล่าเปรียบเทียบข้อมูลระดับน้ำปัจจุบันกับ "ข้อมูลน้ำย้อนหลัง" ที่แนบให้ โดยต้องระบุให้ชัดเจนว่าปีที่แล้ววันที่เท่าไหร่ เวลาไหน (ตามข้อมูลย้อนหลังที่ให้ไป) และระดับน้ำ/การระบายปีนี้กับปีที่แล้วต่างกันอย่างไร
+    5. ระดับน้ำและเขื่อน: **บังคับ** ให้เล่าเปรียบเทียบข้อมูลระดับน้ำปัจจุบันกับ "ข้อมูลน้ำย้อนหลัง" ที่แนบให้ โดยต้องระบุให้ชัดเจนว่าปีที่แล้ววันที่เท่าไหร่ เวลาไหน (ตามข้อมูลย้อนหลังที่ให้ไป) และระดับน้ำ/การระบายปีนี้กับปีที่แล้วต่างกันอย่างไร (ห้ามเดาหรือคำนวณปี พ.ศ. เอาเองเด็ดขาด ให้ใช้ปีที่ให้มาในข้อมูลดิบเลย)
 
     โครงสร้างโพสต์:
     **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
