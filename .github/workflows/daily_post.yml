@@ -2,6 +2,12 @@ name: Daily Inburi News
 
 on:
   workflow_dispatch: 
+  # ถ้าอนาคตอยากตั้งเวลาให้รันอัตโนมัติ ให้เอา # หน้า schedule ออก แล้วตั้งเวลาได้เลยครับ
+  # schedule:
+  #   - cron: '30 1,9 * * *' 
+
+permissions:
+  contents: write # จำเป็นมาก เพื่อให้ระบบสามารถบันทึกไฟล์ CSV กลับเข้า GitHub ได้
 
 jobs:
   post_news:
@@ -12,6 +18,8 @@ jobs:
     steps:
       - name: Checkout Code
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }} # เพิ่มการยืนยันตัวตนเพื่อให้ Push กลับได้
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -35,3 +43,12 @@ jobs:
           WAQI_TOKEN: ${{ secrets.WAQI_TOKEN }}
           OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
         run: python main.py
+
+      # เพิ่มขั้นตอนการบันทึกไฟล์ CSV และ JSON กลับเข้าสู่ Repository
+      - name: Commit and Push changes
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add state.json history_water.csv || true
+          git commit -m "Auto-update state and history data" -a || true
+          git push origin HEAD || true
