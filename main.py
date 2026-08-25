@@ -86,8 +86,6 @@ def get_dist(lat1, lon1, lat2, lon2):
 
 # ─────────────────────────────────────────────
 # TMD ชุดที่ 1: ผลตรวจวัดและพยากรณ์อากาศ (Observation)
-# endpoint: https://data.tmd.go.th/api/Weather3Hours/v2/
-# ข้อมูลจริงจากสถานีตรวจอากาศทุก 3 ชั่วโมง
 # ─────────────────────────────────────────────
 def get_tmd_observation() -> dict:
     result = {'available': False}
@@ -95,12 +93,10 @@ def get_tmd_observation() -> dict:
         print("⚠️ TMD_API_KEY ไม่พบ")
         return result
     try:
-        # แก้จุดที่ 1: ลบ domain=string ออก
         url = (
             "https://data.tmd.go.th/api/Weather3Hours/v2/"
             f"?APIkey={TMD_API_KEY}&station_type=ตรวจอากาศผิวพื้น"
         )
-        # เพิ่ม headers บังคับขอรับข้อมูลเป็น JSON
         headers = {'Accept': 'application/json'}
         res = requests.get(url, headers=headers, timeout=15)
         print(f"TMD Observation HTTP: {res.status_code}")
@@ -181,14 +177,12 @@ def get_tmd_observation() -> dict:
 
 # ─────────────────────────────────────────────
 # TMD ชุดที่ 2: พยากรณ์จากกรมอุตุฯ (WeatherForecast)
-# endpoint: https://data.tmd.go.th/api/WeatherForecast/v2/
 # ─────────────────────────────────────────────
 def get_tmd_nwp_forecast() -> dict:
     result = {'available': False}
     if not TMD_API_KEY:
         return result
 
-    # แก้จุดที่ 2: ลบ domain=string ออกจากทั้ง 2 endpoint
     endpoints = [
         (
             "https://data.tmd.go.th/api/WeatherForecast/v2/"
@@ -204,7 +198,7 @@ def get_tmd_nwp_forecast() -> dict:
     ]
 
     data = None
-    headers = {'Accept': 'application/json'} # เพิ่ม headers ตรงนี้
+    headers = {'Accept': 'application/json'}
     for ep_url in endpoints:
         try:
             res = requests.get(ep_url, headers=headers, timeout=15)
@@ -295,7 +289,6 @@ def get_actual_rain_last_hour() -> dict:
             f"&hourly=precipitation&past_hours=3&forecast_hours=1"
             f"&timezone=Asia%2FBangkok"
         )
-        # แก้จุดที่ 3: เปลี่ยน timeout เป็น 20
         res    = requests.get(url, timeout=20).json()
         times  = res['hourly']['time']
         precip = res['hourly']['precipitation']
@@ -410,7 +403,6 @@ def get_comprehensive_rain_info() -> dict:
     rain_3h     = actual.get('rain_3h', 0) or 0
     tmd_rain_3h = tmd_obs.get('rain_3h', 0) or 0
 
-    # TMD สถานีน่าเชื่อถือกว่า Open-Meteo สำหรับฝนจริง
     actual_rain_best = tmd_rain_3h if (tmd_obs.get('available') and tmd_rain_3h > 0) else rain_3h
 
     actual_text = ""
@@ -548,15 +540,6 @@ def _weighted_pm25(rows):
 
 
 def classify_pm25_th(pm25_value):
-    """
-    อ้างอิงเกณฑ์ AQI ไทยปี 2566 ของ คพ.
-    PM2.5:
-      0-15      = ดีมาก
-      15.1-25   = ดี
-      25.1-37.5 = ปานกลาง/เริ่มกระทบกลุ่มเสี่ยง
-      37.6-75   = เริ่มมีผลกระทบต่อสุขภาพ
-      >75       = มีผลกระทบต่อสุขภาพมาก
-    """
     pm = _safe_float(pm25_value)
     if pm is None:
         return {
@@ -611,19 +594,7 @@ def build_pm25_instruction(pm25_value, source_label='ระบบคัดกร
 
 
 def get_accurate_pm25(return_meta=False):
-    """
-    ดึงค่า PM2.5 โดยกัน under-report ให้มากที่สุดเท่าที่ทำได้จากแหล่งข้อมูลภายนอก
-    โดยแตะเฉพาะระบบฝุ่นเท่านั้น
-
-    ลำดับใหม่:
-      [1] Air4Thai ≤20 กม. อายุ ≤1 ชม.      (สถานีจริง ใกล้สุด)
-      [2] Air4Thai ≤50 กม. อายุ ≤3 ชม.      (restore พฤติกรรมเดิมที่แม่นกว่าโค้ดใหม่)
-      [3] WAQI สถานีสิงห์บุรี/ใกล้เคียง      (ground station fallback)
-      [4] max(GISTDA, Open-Meteo)            (protective ceiling กันบอกว่าอากาศดีทั้งที่ฝุ่นเริ่มขึ้น)
-      [5] OWM                                 (fallback สุดท้าย)
-      [6] Air4Thai stale ≤50 กม.             (ดีกว่า N/A)
-    """
-    PM_LAT, PM_LON = 15.0076, 100.3273  # ใช้พิกัดชุดเก่าที่ผู้ใช้บอกว่าแม่นกว่า เฉพาะ PM เท่านั้น
+    PM_LAT, PM_LON = 15.0076, 100.3273
     STRICT_KM = 20
     WIDE_KM = 50
     STRICT_AGE = 3600
@@ -634,7 +605,6 @@ def get_accurate_pm25(return_meta=False):
     gistda_value = waqi_value = owm_value = openmeteo_value = None
     selected_source = None
 
-    # ── 1. GISTDA ────────────────────────────────────────
     try:
         res = requests.get(
             f"https://pm25.gistda.or.th/rest/getPM25byLocation"
@@ -650,7 +620,6 @@ def get_accurate_pm25(return_meta=False):
     except Exception as e:
         print(f"⚠️ GISTDA error: {e}")
 
-    # ── 2. Air4Thai (PCD) — รัศมี 50 กม. ────────────────
     try:
         res = requests.get(
             f"http://air4thai.pcd.go.th/services/getNewAQI_JSON.php?t={int(time.time())}",
@@ -690,7 +659,6 @@ def get_accurate_pm25(return_meta=False):
     except Exception as e:
         print(f"⚠️ Air4Thai error: {e}")
 
-    # ── 3. WAQI — สถานีสิงห์บุรีโดยตรง ──────────────────
     WAQI_TOKEN = os.environ.get("WAQI_TOKEN")
     if WAQI_TOKEN:
         for sid in ["419585", "419584"]:
@@ -739,7 +707,6 @@ def get_accurate_pm25(return_meta=False):
     else:
         print("⚠️ WAQI_TOKEN ไม่พบ")
 
-    # ── 4. OpenWeatherMap Air Pollution API ───────────────
     OWM_API_KEY = os.environ.get("OWM_API_KEY")
     if OWM_API_KEY:
         try:
@@ -759,7 +726,6 @@ def get_accurate_pm25(return_meta=False):
     else:
         print("⚠️ OWM_API_KEY ไม่พบ")
 
-    # ── 5. Open-Meteo ─────────────────────────────────────
     try:
         res = requests.get(
             f"https://air-quality-api.open-meteo.com/v1/air-quality"
@@ -776,9 +742,7 @@ def get_accurate_pm25(return_meta=False):
     except Exception as e:
         print(f"⚠️ Open-Meteo error: {e}")
 
-    # ── Decision Logic ────────────────────────────────────
 
-    # [1] Air4Thai ใกล้มากและสดมาก
     strict = [r for r in air4thai_rows if r['distance'] <= STRICT_KM and r['age'] <= STRICT_AGE]
     if strict:
         strict.sort(key=lambda x: (x['distance'], x['age']))
@@ -788,7 +752,6 @@ def get_accurate_pm25(return_meta=False):
             print(f"✅ ใช้ {selected_source}: {pm:.1f}")
             return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
-    # [2] Air4Thai กว้างขึ้นแต่ยังสดพอ (restore แบบโค้ดเก่า)
     wide = [r for r in air4thai_rows if r['distance'] <= WIDE_KM and r['age'] <= WIDE_AGE]
     if wide:
         wide.sort(key=lambda x: (x['distance'], x['age']))
@@ -798,13 +761,11 @@ def get_accurate_pm25(return_meta=False):
             print(f"✅ ใช้ {selected_source}: {pm:.1f}")
             return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
-    # [3] WAQI เป็นสถานีภาคพื้น ให้มาก่อนดาวเทียม
     if waqi_value is not None:
         selected_source = "WAQI สถานีใกล้เคียง"
         print(f"✅ ใช้ {selected_source}: {waqi_value:.1f}")
         return ({'pm25': f"{waqi_value:.1f}", 'source': selected_source} if return_meta else f"{waqi_value:.1f}")
 
-    # [4] ไม่มีสถานีภาคพื้น → ใช้ protective ceiling กัน false-good
     ceiling_candidates = [v for v in [gistda_value, openmeteo_value] if v is not None]
     if ceiling_candidates:
         pm = max(ceiling_candidates)
@@ -812,13 +773,11 @@ def get_accurate_pm25(return_meta=False):
         print(f"✅ ใช้ {selected_source}: {pm:.1f} จาก {ceiling_candidates}")
         return ({'pm25': f"{pm:.1f}", 'source': selected_source} if return_meta else f"{pm:.1f}")
 
-    # [5] OWM fallback
     if owm_value is not None:
         selected_source = "OpenWeatherMap fallback"
         print(f"✅ ใช้ {selected_source}: {owm_value:.1f}")
         return ({'pm25': f"{owm_value:.1f}", 'source': selected_source} if return_meta else f"{owm_value:.1f}")
 
-    # [6] Air4Thai stale ยังดีกว่า N/A
     stale = [r for r in air4thai_rows if r['distance'] <= WIDE_KM]
     if stale:
         stale.sort(key=lambda x: (x['age'], x['distance']))
@@ -1069,7 +1028,6 @@ def get_historical_water_data(target_date):
         thai_date_str = f"{b_dt.day} {THAI_MONTHS_LOCAL[b_dt.month - 1]} {b_dt.year + 543}"
         t_str = b_dt.strftime('%H:%M')
         
-        # เพิ่มข้อมูลระยะห่างตลิ่งเข้าไปให้ AI อ่าน
         if best['date_diff'] == 0:
              records.append(f"📌 {st_name} ปีที่แล้ว (ตรงกับวันนี้ วันที่ {thai_date_str} เวลา {t_str} น.) ระดับน้ำ {best['wl']} ม. ({best['b_status']}) | ระบายน้ำ {best['dis']} ลบ.ม./วินาที")
         else:
@@ -1142,7 +1100,7 @@ if __name__ == "__main__":
 
     historical_water_text = get_historical_water_data(now)
 
-   prompt = f"""
+    prompt = f"""
     คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
     ข้อมูลดิบปัจจุบัน: วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}
     - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
