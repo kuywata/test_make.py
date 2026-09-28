@@ -1150,7 +1150,25 @@ if __name__ == "__main__":
             else:
                 final_post = "**สถานการณ์อินทร์บุรี**... (ระบบ AI ขัดข้องชั่วคราว)"
 
-    print("\nข้อความที่จะโพสต์:\n", final_post)
+      print("\nข้อความที่จะโพสต์:\n", final_post)
+
+    # ───────── จุดที่เพิ่ม: กันคำว่า "สบายใจได้" ตอนน้ำใกล้ตลิ่ง ─────────
+    ตลิ่งอินทร์บุรี = 13.10
+    try:
+        if 'wl' in locals() and wl is not None and final_post:
+            ระยะห่างตลิ่ง = ตลิ่งอินทร์บุรี - float(wl)
+            if ระยะห่างตลิ่ง <= 1.50:
+                final_post = final_post.replace("ยังพอสบายใจได้อยู่", "ต้องเฝ้าระวังใกล้ชิด")
+                final_post = final_post.replace("พอสบายใจได้", "อย่าเพิ่งวางใจ")
+                final_post = final_post.replace("สบายใจได้", "อย่าเพิ่งวางใจ")
+                final_post = final_post.replace("ไม่ต้องห่วง", "ขอให้ติดตามต่อเนื่อง")
+                final_post = final_post.replace("ไม่ต้องกังวล", "ขอให้ติดตามต่อเนื่อง")
+                final_post = final_post.replace("ปกติดี", "ยังไม่มีอะไรผิดปกติ")
+                final_post = final_post.replace("วางใจได้", "ยังพอมีเวลาเตรียมตัว")
+                print(f"🧹 น้ำเหลือถึงตลิ่ง {ระยะห่างตลิ่ง:.2f} ม. — ตัดคำปลอบใจออกแล้ว")
+    except Exception as e:
+        print(f"⚠️ Guard check error: {e}")
+    # ───────────────────────────────────────────────────────────────
 
     if MAKE_WEBHOOK_URL and final_post and "ขัดข้องชั่วคราว" not in final_post:
         res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post})
