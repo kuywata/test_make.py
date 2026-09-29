@@ -850,7 +850,7 @@ def get_weather():
 
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
-    water_level, bank_level = None, 13.10
+    water_level, bank_level = None, 13.00  # อ้างอิงจากข้อมูลย้อนหลังจริง (ยังไม่ได้ scrape สดจากหน้าเว็บ ดู หมายเหตุ)
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page    = browser.new_page()
@@ -985,7 +985,7 @@ def get_historical_water_data(target_date):
                     # --- คำนวณความห่างจากตลิ่ง ---
                     try:
                         wl_float = float(wl_val)
-                        bank_lvl = 13.10 if station_name == "อินทร์บุรี" else 13.87
+                        bank_lvl = 13.00 if station_name == "อินทร์บุรี" else 13.87
                         diff_bank = bank_lvl - wl_float
                         if diff_bank > 0:
                             b_status = f"ต่ำกว่าตลิ่ง {diff_bank:.2f} ม."
@@ -1029,7 +1029,7 @@ def get_historical_water_data(target_date):
                         
                         try:
                             wl_float = float(w_val)
-                            bank_lvl = 13.10 if s_name == "อินทร์บุรี" else 13.87
+                            bank_lvl = 13.00 if s_name == "อินทร์บุรี" else 13.87
                             diff_bank = bank_lvl - wl_float
                             if diff_bank > 0:
                                 b_status = f"ต่ำกว่าตลิ่ง {diff_bank:.2f} ม."

@@ -23,7 +23,7 @@ MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
 ENABLE_RESEARCH = os.environ.get("ENABLE_RESEARCH", "1") != "0"
 
 # ───────── ค่าที่ปรับได้ ─────────
-BANK_LEVEL = {"อินทร์บุรี": 13.10, "โพนางดำ": 13.87}
+BANK_LEVEL = {"อินทร์บุรี": 13.00, "โพนางดำ": 13.87}  # ยืนยันจากข้อมูลย้อนหลังจริง (ทุกแถวใน xlsx/csv)
 GAP_HIGH = 0.50           # ต่ำกว่าตลิ่งไม่เกินนี้ (ม.) = เสี่ยงสูง
 GAP_WATCH = 1.50          # ต่ำกว่าตลิ่งไม่เกินนี้ (ม.) = เฝ้าระวัง (ห้ามใช้คำปลอบใจ)
 RISE_FAST_PER_DAY = 0.15  # น้ำขึ้นเร็วกว่านี้ (ม./วัน) -> เพิ่มระดับความเสี่ยง 1 ขั้น
@@ -401,7 +401,10 @@ def write_post(client, facts, analysis, research_text, prev_post, header, has_fi
 5. ห้ามบอกว่าฝนกำลังตก/ฝนปรอย ถ้า rain_now_confirmed เป็น false ให้พูดเป็น "โอกาสฝน" หรือ "เสี่ยงมีฝน"
 6. ระบายน้ำเขื่อน: ใช้ตัวเลขของอินทร์บุรี/เขื่อนเจ้าพระยาเท่านั้น โพนางดำพูดได้เฉพาะระดับน้ำ/ระยะห่างตลิ่งของ "ปีที่แล้ว" และต้องบอกชัดว่าเป็นข้อมูลปีที่แล้ว ห้ามใส่ตัวเลขระบายน้ำของโพนางดำ
 7. ฝุ่น: ใช้ถ้อยคำให้ตรงกับระดับ (pm25.instruction) ห้ามเขียนว่าอากาศดีถ้าระดับไม่ใช่ดี/ดีมาก
-8. ถ้ามี news_points ให้ใส่หัวข้อ 📰 สั้นๆ พร้อมชื่อหน่วยงานและวันที่ ถ้าไม่มีให้ข้ามหัวข้อนี้ทั้งหมด ห้ามกุข่าว
+8. ถ้ามี news_points ให้ใส่หัวข้อ 📰 สั้นๆ พร้อมชื่อหน่วยงานและวันที่ ถ้าไม่มีให้ข้ามหัวข้อนี้ทั้งหมด
+   ห้ามกุข่าว ห้ามเสริมตัวเลข/แผนงาน/ชื่อหน่วยงานที่ไม่ได้อยู่ในข้อความ "ข่าว/ประกาศล่าสุดที่ค้นมา" ตรงตัว
+   แต่ละบรรทัดในหัวข้อ 📰 ต้องสรุปมาจากสิ่งที่ค้นเจอเท่านั้น ถ้าค้นไม่เจออะไรเลยหรือไม่แน่ใจ ห้ามใส่หัวข้อนี้เด็ดขาด
+   ดีกว่าใส่ข่าวที่ไม่มีแหล่งจริง เพราะเพจนี้พูดเรื่องภัยพิบัติ ถ้าข้อมูลผิดจะทำให้คนไม่เชื่อและอาจตัดสินใจผิดพลาด
 9. ทักทายตามวัน{facts['now']['weekday']} และช่วง{facts['now']['period']}จริงๆ ห้ามเดาเอง
 10. ปิดด้วย 📌 สรุป + สิ่งที่ทำได้จริง 1-2 ข้อ (จาก advice) ความยาวรวมไม่เกิน ~1,600 ตัวอักษร ห้ามใส่ hashtag
 
@@ -458,13 +461,55 @@ def llm_review(client, post, facts, analysis):
         return True, []
 
 
+def strip_unverified_news(post, research_text):
+    """ด่านสุดท้ายกันข่าวมั่ว: ตัดบรรทัดใต้หัวข้อ 📰 ที่ไม่มีคำสำคัญปรากฏใน research_text ออก
+    (ไม่ไว้ใจ AI reviewer อย่างเดียว เพราะพบว่าโพสต์จริงเคยหลุดข่าวที่กุขึ้นออกไปทั้งที่ reviewer ทักแล้ว)"""
+    if "📰" not in post:
+        return post, []
+    research_text = research_text or ""
+    lines = post.split("\n")
+    out, removed, in_news = [], [], False
+    section_markers = ("🌡️", "🌧️", "🌊", "🛑", "📌", "📰")
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("📰"):
+            in_news = True
+            out.append(line)
+            continue
+        if in_news and stripped.startswith(section_markers) and not stripped.startswith("📰"):
+            in_news = False
+        if in_news and stripped and stripped[0] in "*-•":
+            # ตัดเป็นท่อนย่อยด้วยเครื่องหมายวรรคตอน/คำเชื่อมทั่วไป เพื่อจับกรณี AI แอบเติมข้อความมั่ว
+            # ต่อท้ายในบรรทัดข่าวจริง (เจอเคสจริง: ท่อนแรกของประโยคเป็นข่าวจริง แต่มีท่อนที่แต่งเพิ่มต่อท้าย)
+            chunks = re.split(r"[,，。;：:]| และ| โดย| ซึ่ง| แต่| พร้อม", stripped)
+            words = [w for w in re.findall(r"[ก-๙A-Za-z0-9]{4,}", stripped)]
+            bad_chunks = 0
+            for ch in chunks:
+                cw = re.findall(r"[ก-๙A-Za-z0-9]{4,}", ch)
+                if len(cw) >= 2 and sum(1 for w in cw if w in research_text) / len(cw) < 0.25:
+                    bad_chunks += 1
+            verified = sum(1 for w in words if w in research_text)
+            if not words or verified / len(words) < 0.3 or bad_chunks >= 1:
+                removed.append(stripped)
+                continue
+        out.append(line)
+    cleaned = "\n".join(out)
+    # ถ้าตัดจนไม่เหลือบรรทัดข่าวเลย ให้เอาหัวข้อ 📰 ออกทั้งหมดด้วย
+    cleaned = re.sub(r"\n*📰[^\n]*\n(?=\n|$)", "\n", cleaned)
+    return cleaned, removed
+
+
 def template_post(facts, analysis, header):
     w = facts["water"]
     gap = w.get("gap_to_bank")
     lines = [header, ""]
     if w.get("wl") is not None:
-        gtxt = (f"ล้นตลิ่ง {abs(gap):.2f} เมตร" if gap is not None and gap < 0
-                else f"ต่ำกว่าตลิ่ง {gap:.2f} เมตร")
+        if gap is None:
+            gtxt = "ไม่ทราบระยะห่างจากตลิ่ง"
+        elif gap < 0:
+            gtxt = f"ล้นตลิ่ง {abs(gap):.2f} เมตร"
+        else:
+            gtxt = f"ต่ำกว่าตลิ่ง {gap:.2f} เมตร"
         lines.append(f"🌊 **ระดับน้ำอินทร์บุรี:** {w['wl']:.2f} เมตร ({gtxt})")
         if w.get("change_24h") is not None:
             lines.append(f"เทียบเมื่อวาน {w['change_24h']:+.2f} เมตร")
@@ -478,7 +523,12 @@ def template_post(facts, analysis, header):
 
 
 def review_and_fix(client, post, facts, analysis, research_text, prev_post, header, has_fire, max_fix=2):
+    problems = ["ยังไม่ได้ตรวจ"]   # กันไว้เผื่อ loop ไม่เข้าเลย (ไม่เกิดขึ้นจริงเพราะ range(max_fix+1)>=1)
     for attempt in range(max_fix + 1):
+        removed = []
+        post, removed = strip_unverified_news(post, research_text)
+        if removed:
+            print(f"✂️ ตัดข่าวที่ไม่มีในผลค้นหาออก {len(removed)} ข้อ: {removed}")
         problems = rule_check(post, analysis, facts)
         if not problems:
             ok, llm_problems = llm_review(client, post, facts, analysis)
@@ -494,11 +544,13 @@ def review_and_fix(client, post, facts, analysis, research_text, prev_post, head
         except Exception as e:
             print(f"⚠️ เขียนใหม่ไม่สำเร็จ: {e}")
             break
-    final_rule_problems = rule_check(post, analysis, facts)
-    if final_rule_problems:
-        print("⚠️ ร่างสุดท้ายยังผิดกฎแข็ง → ใช้เทมเพลตข้อเท็จจริงแทน")
-        return template_post(facts, analysis, header), final_rule_problems
-    return post, problems
+    # สำคัญ: ตัดสินจากปัญหาล่าสุดที่เจอจริง (กฎแข็ง หรือ AI reviewer ก็ได้) ไม่ใช่แค่เช็กกฎแข็งซ้ำ
+    # เคยพบเคสจริงที่ AI reviewer ทักว่ามีข่าวกุขึ้นมา 2 รอบติด แต่โค้ดเดิมเช็กแค่กฎแข็งตอนจบ
+    # (ไม่ครอบคลุมเรื่องข่าวมั่ว) เลยปล่อยโพสต์ที่มีข่าวปลอมออกไปจริง ต้องไม่ให้เกิดซ้ำ
+    if problems:
+        print(f"⚠️ ร่างสุดท้ายยังมีปัญหาที่แก้ไม่หมด ({problems}) → ใช้เทมเพลตข้อเท็จจริงแทน")
+        return template_post(facts, analysis, header), problems
+    return post, []
 
 
 # ═════════════════════════════════════════════
