@@ -848,9 +848,11 @@ def get_weather():
     except: pass
     return temp, pm25, rain_prob, humidity, wind, uv
 
-def get_inburi_data():
+def get_water_stations(names=("อินทร์บุรี", "โพนางดำ")):
+    """ดึงระดับน้ำหลายสถานีจากหน้าเดียวกัน คืน {ชื่อสถานี: ระดับน้ำ หรือ None}"""
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
-    water_level, bank_level = None, 13.00  # อ้างอิงจากข้อมูลย้อนหลังจริง (ยังไม่ได้ scrape สดจากหน้าเว็บ ดู หมายเหตุ)
+    found = {n: None for n in names}
+    seen = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page    = browser.new_page()
@@ -859,7 +861,11 @@ def get_inburi_data():
             page.wait_for_selector("th[scope='row']", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
             for th in soup.select("th[scope='row']"):
-                if "อินทร์บุรี" in th.get_text(strip=True):
+                label = th.get_text(strip=True)
+                seen.append(label)
+                for n in names:
+                    if found[n] is not None or n not in label:
+                        continue
                     cols = th.find_parent("tr").find_all("td")
                     nums = []
                     for td in cols:
@@ -869,13 +875,20 @@ def get_inburi_data():
                             if c and c != "-": nums.append(float(c))
                         except: continue
                     if nums:
-                        water_level = nums[0]
-                        break
+                        found[n] = nums[0]
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
         finally:
             browser.close()
-    return water_level, bank_level
+    print(f"📋 สถานีที่เห็นบนหน้าเว็บ ({len(seen)}): {seen[:40]}")
+    for n, v in found.items():
+        print(f"   {'✅' if v is not None else '❌ ไม่พบ'} {n}: {v}")
+    return found
+
+def get_inburi_data():
+    """คงไว้เพื่อความเข้ากันได้กับโค้ดเดิม"""
+    st = get_water_stations(("อินทร์บุรี",))
+    return st.get("อินทร์บุรี"), 13.00
 
 def fetch_chao_phraya_dam_discharge():
     try:
@@ -894,7 +907,7 @@ def fetch_chao_phraya_dam_discharge():
 # ─────────────────────────────────────────────
 # ระบบบันทึกข้อมูลรายวัน (Save to CSV)
 # ─────────────────────────────────────────────
-def save_current_water_data(wl, discharge):
+def save_current_water_data(wl, discharge, pho_wl=None):
     csv_file = "history_water.csv"
     file_exists = os.path.isfile(csv_file)
     try:
@@ -909,6 +922,8 @@ def save_current_water_data(wl, discharge):
             dis_val = discharge if discharge is not None else "-"
             
             writer.writerow([date_str_csv, time_str_csv, "อินทร์บุรี", wl_val, dis_val])
+            if pho_wl is not None:
+                writer.writerow([date_str_csv, time_str_csv, "โพนางดำ", pho_wl, "-"])
     except Exception as e:
         print(f"⚠️ บันทึกข้อมูลลงประวัติรายวันไม่ได้: {e}")
 
@@ -1086,15 +1101,17 @@ if __name__ == "__main__":
     temp, _, rain_prob, humidity, wind, uv = get_weather()
     pm25_meta = get_accurate_pm25(return_meta=True)
     pm25 = pm25_meta['pm25']
-    wl, bank_level = get_inburi_data()
+    stations = get_water_stations()
+    wl, bank_level = stations.get("อินทร์บุรี"), 13.00
+    pho_wl = stations.get("โพนางดำ")
     discharge = fetch_chao_phraya_dam_discharge()
     hotspots = get_hotspots()
     rain_info = get_comprehensive_rain_info()
 
     # ── 2) ประวัติ/บริบทน้ำ (โหลดก่อนบันทึกค่าใหม่) ──
     series = ai_brain.load_series()
-    save_current_water_data(wl, discharge)
-    water_ctx = ai_brain.build_water_context(now, wl, discharge, series, bank_level)
+    save_current_water_data(wl, discharge, pho_wl)
+    water_ctx = ai_brain.build_water_context(now, wl, discharge, series, bank_level, pho_wl=pho_wl)
     if water_ctx.get("change_24h") is None and wl is not None and prev_wl is not None:
         water_ctx["change_since_last_run"] = round(float(wl) - float(prev_wl), 2)   # ไม่ใช่ "เมื่อวาน"
     risk = ai_brain.assess_water_risk(water_ctx)
@@ -1128,6 +1145,8 @@ if __name__ == "__main__":
                        "note": "ช่วงเวลาที่ตรงกับชั่วโมงปัจจุบันคือ 'ตอนนี้' ไม่ใช่อนาคต"},
         "water": {**water_ctx, "risk_level": risk['level'], "risk_reasons": risk['reasons']},
     }
+
+    facts = ai_brain.thai_dates(facts)   # วันที่ทั้งหมดเป็น วัน เดือน ปี(พ.ศ.) ก่อนส่งให้ AI/เทมเพลต
 
     header = f"**สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})"
     when_text = f"วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}"
