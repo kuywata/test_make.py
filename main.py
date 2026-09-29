@@ -85,35 +85,6 @@ def get_dist(lat1, lon1, lat2, lon2):
     return R * 2 * math.asin(math.sqrt(a))
 
 # ─────────────────────────────────────────────
-# HTTP helper: retry + backoff (429/5xx/timeout) และแคช Tomorrow.io ต่อรอบรัน
-# ─────────────────────────────────────────────
-def _http_get_json(url, timeout=20, retries=3, headers=None):
-    for i in range(retries):
-        try:
-            r = requests.get(url, timeout=timeout, headers=headers)
-            if r.status_code == 200:
-                return r.json()
-            if r.status_code not in (429, 500, 502, 503, 504):
-                print(f"⚠️ HTTP {r.status_code}: {url.split('?')[0]}")
-                return None
-        except Exception as e:
-            print(f"⚠️ GET ล้มเหลว ({i+1}/{retries}) {url.split('?')[0]}: {e}")
-        time.sleep(3 * (i + 1))
-    return None
-
-_TMR_CACHE = {}
-def _tomorrow_forecast():
-    """เรียก Tomorrow.io ครั้งเดียวต่อรอบรัน (ประหยัดโควตา) ใช้ร่วมกันทั้ง get_weather และ get_rain_storm_forecast"""
-    key = os.environ.get("TOMORROW_API_KEY")
-    if not key:
-        return None
-    if "data" not in _TMR_CACHE:
-        _TMR_CACHE["data"] = _http_get_json(
-            f"https://api.tomorrow.io/v4/weather/forecast"
-            f"?location={INBURI_LAT},{INBURI_LON}&apikey={key}", timeout=15, retries=3)
-    return _TMR_CACHE["data"]
-
-# ─────────────────────────────────────────────
 # TMD ชุดที่ 1: ผลตรวจวัดและพยากรณ์อากาศ (Observation)
 # ─────────────────────────────────────────────
 def get_tmd_observation() -> dict:
@@ -214,10 +185,6 @@ def get_tmd_nwp_forecast() -> dict:
 
     endpoints = [
         (
-            "https://data.tmd.go.th/nwpapi/v1/forecast/location/hourly/at"
-            f"?lat={INBURI_LAT}&lon={INBURI_LON}&fields=tc,rh,rain,ws10m&duration=6"
-        ),
-        (
             "https://data.tmd.go.th/api/WeatherForecast/v2/"
             f"?APIkey={TMD_API_KEY}"
             f"&lat={INBURI_LAT}&lon={INBURI_LON}"
@@ -231,14 +198,11 @@ def get_tmd_nwp_forecast() -> dict:
     ]
 
     data = None
+    headers = {'Accept': 'application/json'}
     for ep_url in endpoints:
         try:
-            headers = {'Accept': 'application/json'}
-            if "/nwpapi/" in ep_url:
-                headers['Authorization'] = f"Bearer {TMD_API_KEY}"
             res = requests.get(ep_url, headers=headers, timeout=15)
-            ep_name = ("nwpapi-v1" if "/nwpapi/" in ep_url else
-                       "WeatherForecast" if "WeatherForecast" in ep_url else "NowcastForecast")
+            ep_name = "WeatherForecast" if "WeatherForecast" in ep_url else "NowcastForecast"
             print(f"TMD NWP ({ep_name}) HTTP: {res.status_code}")
             raw = res.text.strip()
             if not raw:
@@ -280,7 +244,7 @@ def get_tmd_nwp_forecast() -> dict:
             except: pass
             try: thunder_vals.append(float(d.get('thunderstorm', 0) or 0))
             except: pass
-            try: wind_vals.append(float(d.get('ws', d.get('ws10m', 0)) or 0))
+            try: wind_vals.append(float(d.get('ws', 0) or 0))
             except: pass
             try: temp_vals.append(float(d.get('tc', 0) or 0))
             except: pass
@@ -325,9 +289,7 @@ def get_actual_rain_last_hour() -> dict:
             f"&hourly=precipitation&past_hours=3&forecast_hours=1"
             f"&timezone=Asia%2FBangkok"
         )
-        res    = _http_get_json(url, timeout=25, retries=3)
-        if not res:
-            return result
+        res    = requests.get(url, timeout=20).json()
         times  = res['hourly']['time']
         precip = res['hourly']['precipitation']
 
@@ -355,9 +317,13 @@ def get_rain_storm_forecast() -> dict:
     if not TOMORROW_API_KEY:
         return {}
     try:
-        data = _tomorrow_forecast()
-        if not data:
+        res = requests.get(
+            f"https://api.tomorrow.io/v4/weather/forecast"
+            f"?location={INBURI_LAT},{INBURI_LON}&apikey={TOMORROW_API_KEY}",
+            timeout=10)
+        if res.status_code != 200:
             return {}
+        data = res.json()
 
         hourly_6h   = data['timelines']['hourly'][:6]
         hourly_24h  = data['timelines']['hourly'][:24]
@@ -829,8 +795,12 @@ def get_weather():
     temp, pm25, rain_prob, humidity, wind, uv = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
     if TOMORROW_API_KEY:
         try:
-            tmr_res = _tomorrow_forecast()
-            if tmr_res:
+            res = requests.get(
+                f"https://api.tomorrow.io/v4/weather/forecast"
+                f"?location={INBURI_LAT},{INBURI_LON}&apikey={TOMORROW_API_KEY}",
+                timeout=10)
+            if res.status_code == 200:
+                tmr_res      = res.json()
                 current_data = tmr_res['timelines']['minutely'][0]['values']
                 humidity     = round(current_data['humidity'], 1)
                 wind         = round(current_data['windSpeed'], 1)
@@ -838,11 +808,11 @@ def get_weather():
                                    for h in tmr_res['timelines']['hourly'][:12])
         except: pass
     try:
-        res  = _http_get_json(
+        res  = requests.get(
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={INBURI_LAT}&longitude={INBURI_LON}"
             f"&current=temperature_2m,uv_index&timezone=Asia%2FBangkok",
-            timeout=15, retries=3)
+            timeout=10).json()
         temp = res['current']['temperature_2m']
         uv   = res['current'].get('uv_index', 'N/A')
     except: pass
@@ -850,7 +820,7 @@ def get_weather():
 
 def get_inburi_data():
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
-    water_level, bank_level = None, 13.00  # อ้างอิงจากข้อมูลย้อนหลังจริง (ยังไม่ได้ scrape สดจากหน้าเว็บ ดู หมายเหตุ)
+    water_level, bank_level = None, 13.10
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page    = browser.new_page()
@@ -985,7 +955,7 @@ def get_historical_water_data(target_date):
                     # --- คำนวณความห่างจากตลิ่ง ---
                     try:
                         wl_float = float(wl_val)
-                        bank_lvl = 13.00 if station_name == "อินทร์บุรี" else 13.87
+                        bank_lvl = 13.10 if station_name == "อินทร์บุรี" else 13.87
                         diff_bank = bank_lvl - wl_float
                         if diff_bank > 0:
                             b_status = f"ต่ำกว่าตลิ่ง {diff_bank:.2f} ม."
@@ -1029,7 +999,7 @@ def get_historical_water_data(target_date):
                         
                         try:
                             wl_float = float(w_val)
-                            bank_lvl = 13.00 if s_name == "อินทร์บุรี" else 13.87
+                            bank_lvl = 13.10 if s_name == "อินทร์บุรี" else 13.87
                             diff_bank = bank_lvl - wl_float
                             if diff_bank > 0:
                                 b_status = f"ต่ำกว่าตลิ่ง {diff_bank:.2f} ม."
@@ -1069,99 +1039,138 @@ def get_historical_water_data(target_date):
 
 
 # ─────────────────────────────────────────────
-# Main (เวอร์ชัน AI agent: ค้นข่าว -> วิเคราะห์ -> เขียน -> ตรวจ -> โพสต์)
+# Main
 # ─────────────────────────────────────────────
-import ai_brain
-
-DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"                       # 1 = ไม่ส่ง webhook
-POST_TEMPLATE_ON_AI_FAIL = os.environ.get("POST_TEMPLATE_ON_AI_FAIL", "0") == "1"
-
 if __name__ == "__main__":
-    print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี ===")
-    state = load_state()
-    prev_wl, prev_discharge = state.get("last_water_level"), state.get("last_discharge")
-    period = ai_brain.period_of_day(now.hour)
+    print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี + พลังดาวเทียม ===")
 
-    # ── 1) เก็บข้อมูลดิบ ──
+    state          = load_state()
+    prev_wl        = state.get("last_water_level")
+    prev_discharge = state.get("last_discharge")
+
     temp, _, rain_prob, humidity, wind, uv = get_weather()
-    pm25_meta = get_accurate_pm25(return_meta=True)
-    pm25 = pm25_meta['pm25']
+    pm25_meta       = get_accurate_pm25(return_meta=True)
+    pm25            = pm25_meta['pm25']
+    pm25_instruction = build_pm25_instruction(pm25, pm25_meta.get('source', 'ระบบคัดกรองฝุ่น'))
     wl, bank_level = get_inburi_data()
-    discharge = fetch_chao_phraya_dam_discharge()
-    hotspots = get_hotspots()
-    rain_info = get_comprehensive_rain_info()
-
-    # ── 2) ประวัติ/บริบทน้ำ (โหลดก่อนบันทึกค่าใหม่) ──
-    series = ai_brain.load_series()
+    discharge      = fetch_chao_phraya_dam_discharge()
+    hotspots       = get_hotspots()
+    
     save_current_water_data(wl, discharge)
-    water_ctx = ai_brain.build_water_context(now, wl, discharge, series, bank_level)
-    if water_ctx.get("change_24h") is None and wl is not None and prev_wl is not None:
-        water_ctx["change_since_last_run"] = round(float(wl) - float(prev_wl), 2)   # ไม่ใช่ "เมื่อวาน"
-    risk = ai_brain.assess_water_risk(water_ctx)
-    print(f"🌊 ความเสี่ยงน้ำ: {risk['level']} | {risk['reasons']}")
+
+    wl_compare_text        = build_compare_text(wl,       prev_wl,       "ม.", "ระดับน้ำ")
+    discharge_compare_text = build_compare_text(discharge, prev_discharge, "ลบ.ม./วินาที", "การระบาย")
 
     new_state = dict(state)
     if wl is not None:        new_state["last_water_level"] = float(wl)
-    if discharge is not None: new_state["last_discharge"] = float(discharge)
+    if discharge is not None: new_state["last_discharge"]   = float(discharge)
     save_state(new_state)
 
-    # ── 3) รวมเป็น facts ก้อนเดียว ──
-    tmr = rain_info.get('forecast') or {}
-    tmd_obs = rain_info.get('tmd_obs') or {}
-    rain_now_confirmed = bool(
-        (tmr.get('rain_now_intensity') or 0) >= 0.5
-        or (rain_info.get('actual_rain_1h') or 0) >= 1
-        or (tmd_obs.get('rain_3h') or 0) >= 1)
-    has_fire = isinstance(hotspots, int) and hotspots > 0
-    facts = {
-        "now": {"date": date_str, "time": time_str, "weekday": thai_day_of_week, "period": period},
-        "weather": {"temp_c": temp, "uv": uv, "rain_prob_12h_pct": rain_prob,
-                    "humidity_pct": humidity, "wind_ms": wind},
-        "pm25": {"value": pm25, "source": pm25_meta.get('source'),
-                 "level": classify_pm25_th(pm25)['label'],
-                 "instruction": build_pm25_instruction(pm25, pm25_meta.get('source', ''))},
-        "hotspots": {"count": hotspots if isinstance(hotspots, int) else None,
-                     "status": "ระบบดาวเทียมขัดข้อง" if hotspots == "N/A" else "ok"},
-        "rain_storm": {"summary": rain_info['summary'], "risk_level": rain_info['risk_level'],
-                       "sources": rain_info.get('sources'), "rain_now_confirmed": rain_now_confirmed,
-                       "max_rain_prob_24h_pct": tmr.get('max_rain_24h'),
-                       "note": "ช่วงเวลาที่ตรงกับชั่วโมงปัจจุบันคือ 'ตอนนี้' ไม่ใช่อนาคต"},
-        "water": {**water_ctx, "risk_level": risk['level'], "risk_reasons": risk['reasons']},
-    }
+    if wl is not None:
+        diff    = round(bank_level - wl, 2)
+        wl_text = (f"ระดับน้ำ {wl} เมตร (⚠️ ล้นตลิ่ง {abs(diff)} เมตร)" if diff < 0
+                   else f"ระดับน้ำ {wl} เมตร (ต่ำกว่าตลิ่ง {diff} เมตร)")
+    else:
+        wl_text = "รออัปเดต"
 
-    header = f"**สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})"
-    when_text = f"วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}"
+    discharge_text = f"{discharge} ลบ.ม./วินาที" if discharge is not None else "รออัปเดต"
 
-    # ── 4) ค้นข่าวล่าสุด -> วิเคราะห์ -> เขียน -> ตรวจ ──
-    research_text, sources = ai_brain.research_latest(client, when_text, period, water_ctx, risk)
-    prev_post = ai_brain.previous_post_brief(state)
-    analysis = ai_brain.analyze(client, facts, risk, research_text, prev_post)
-    print(f"🧠 analysis: level={analysis['level']} focus={analysis.get('focus')}")
+    if hotspots == "N/A":   hotspot_text = "ระบบตรวจจับขัดข้องชั่วคราว"
+    elif hotspots == 0:     hotspot_text = "ไม่พบจุดเผาในพื้นที่ ปลอดภัยดี"
+    else:                   hotspot_text = f"ตรวจพบ {hotspots} จุด (เฝ้าระวังควันจากการเผาไร่/นา)"
 
-    final_post = ""
+    if hotspots not in (0, "N/A") and hotspots:
+        watch_icon, watch_title = "🔥", "เฝ้าระวังความร้อน"
+        watch_data = hotspot_text
+        watch_rule = ("สรุปเรื่องจุดเผาไร่นาตามข้อมูล ห้ามพูดว่าไฟป่าเด็ดขาด บอกเป็น 'ควันจากการเผาไร่/นา'")
+    else:
+        watch_icon, watch_title = "🌧️", "เฝ้าระวังฝนและพายุ"
+        rain_info  = get_comprehensive_rain_info()
+        watch_data = rain_info['summary']
+        if rain_info.get('confidence'):
+            watch_data += f"\n    {rain_info['confidence']}"
+
+        risk = rain_info.get('risk_level', 'none')
+        if risk == 'danger': watch_rule = "มีความเสี่ยงพายุรุนแรงจากหลายแหล่งข้อมูล ให้เตือนชัดเจนจริงจัง แนะนำให้ระวังตัวและอยู่ในที่ปลอดภัย"
+        elif risk == 'warn': watch_rule = "มีความเสี่ยงพายุ ให้เตือนอย่างจริงจัง ไม่ตื่นตระหนกแต่ต้องระมัดระวัง"
+        else: watch_rule = "สรุปพยากรณ์ฝน/พายุตรงไปตรงมา ถ้ามีความเสี่ยงให้เตือน ถ้าไม่มีให้บอกว่าสบายใจได้ ห้ามกุเรื่องหรือเพิ่มความรุนแรงเกินจริง"
+
+    wl_full_text = (wl_text + (f"\n    (เทียบเมื่อวาน: {wl_compare_text})" if wl_compare_text else ""))
+    discharge_full_text = (discharge_text + (f"\n    (เทียบเมื่อวาน: {discharge_compare_text})" if discharge_compare_text else ""))
+
+    historical_water_text = get_historical_water_data(now)
+
+    prompt = f"""
+    คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" อัปเดตข่าวสารให้ชาวบ้านแบบเป็นกันเอง
+    ข้อมูลดิบปัจจุบัน: วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}
+    - อากาศ: {temp}°C, แดด(UV): {uv}, ฝน: {rain_prob}%, ลม: {wind} m/s
+    - ฝุ่น PM 2.5: {pm25_instruction}
+    - {watch_title}: {watch_data}
+    - ระดับน้ำปัจจุบัน (ปี {thai_year}): {wl_full_text}
+    - ระบายเขื่อนปัจจุบัน (ปี {thai_year}): {discharge_full_text}
+    
+    📊 ข้อมูลน้ำย้อนหลัง (เปรียบเทียบช่วงเวลาเดียวกันของปีที่แล้ว): 
+    {historical_water_text}
+
+    กฎการเขียน:
+    1. {watch_title}: {watch_rule}
+    2. ภาษา: ใช้ภาษาพูดง่ายๆ ตัดศัพท์วิชาการทิ้ง (เช่น ม.รทก. → 'เมตร')
+    3. ความไม่จำเจ: ทักทายตามวัน{thai_day_of_week}จริงๆ ห้ามเดาวันเอง ใช้แค่ข้อมูลปัจจุบันที่ให้มา
+    4. ห้ามใช้คำลงท้าย "ครับ/ค่ะ"
+    5. ระดับน้ำและเขื่อน: ให้เปรียบเทียบ "ระยะห่างจากตลิ่ง" ทั้งของอินทร์บุรีและโพนางดำ(ถ้ามี) เทียบกับปีที่แล้ว เพื่อให้เห็นภาพความเสี่ยง 
+    6. **สำคัญมากเรื่องการระบายน้ำเขื่อน:** เขื่อนเจ้าพระยามีที่เดียว แต่ข้อมูลย้อนหลังที่แนบไปอาจมาจากคนละวันกัน ทำให้ตัวเลขระบายน้ำมี 2 ค่า **ให้คุณเลือกใช้ตัวเลขระบายน้ำย้อนหลังของ "อินทร์บุรี" มาเปรียบเทียบเป็นหลักเพียงค่าเดียวเท่านั้น** ห้ามเขียนตัวเลขระบายน้ำของ "โพนางดำ" ลงไปในโพสต์เด็ดขาด เพื่อป้องกันชาวบ้านสับสน
+
+    โครงสร้างโพสต์:
+    **สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})
+
+    🌡️ **สภาพอากาศและฝุ่น:** [สรุปอากาศ+ความรู้สึกเรื่องฝุ่น]
+    {watch_icon} **{watch_title}:** [สรุปตาม {watch_rule}]
+    🌊 **ระดับน้ำอินทร์บุรี:** [บอกระดับน้ำปัจจุบัน แนวโน้มเทียบกับเมื่อวาน และหยิบข้อมูลย้อนหลังของอินทร์บุรีมาเทียบแบบชัดเจน **เน้นอธิบายเรื่องระยะห่างจากตลิ่งปีนี้ เทียบกับปีที่แล้ว** พร้อมระบุวัน/เวลาของปีที่แล้วด้วย]
+    🛑 **ระบายน้ำเขื่อนเจ้าพระยาและโพนางดำ:** [สรุปการระบายน้ำเขื่อนปัจจุบัน เทียบกับเขื่อนปีที่แล้ว (**โดยใช้ตัวเลขระบายน้ำของอินทร์บุรีเท่านั้น**) จากนั้นให้พูดถึงข้อมูลของ "โพนางดำ" **เฉพาะเรื่องระดับน้ำและระยะห่างจากตลิ่ง** เท่านั้น เพื่อให้เห็นภาพรวมพื้นที่ใกล้เคียง]
+
+    📌 **สรุป:** [ทักทายตามวัน{thai_day_of_week} 1-2 บรรทัด]
+    """
+
+    max_retries = 5
+    final_post  = ""
+    for attempt in range(max_retries):
+        try:
+            print(f"กำลังร่างโพสต์ (รอบที่ {attempt+1})...")
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=prompt,
+                config={'temperature': 1.0}
+            )
+            final_post = response.text.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
+            break
+        except Exception as e:
+            print(f"Error: {e}")
+            if attempt < max_retries - 1:
+                time.sleep(10 * (2 ** attempt))
+            else:
+                final_post = "**สถานการณ์อินทร์บุรี**... (ระบบ AI ขัดข้องชั่วคราว)"
+
+      print("\nข้อความที่จะโพสต์:\n", final_post)
+
+    # ───────── จุดที่เพิ่ม: กันคำว่า "สบายใจได้" ตอนน้ำใกล้ตลิ่ง ─────────
+    ตลิ่งอินทร์บุรี = 13.10
     try:
-        draft = ai_brain.write_post(client, facts, analysis, research_text, prev_post, header, has_fire)
-        final_post, leftover = ai_brain.review_and_fix(
-            client, draft, facts, analysis, research_text, prev_post, header, has_fire)
-        if leftover:
-            print(f"ℹ️ ข้อสังเกตที่เหลือ: {leftover}")
+        if 'wl' in locals() and wl is not None and final_post:
+            ระยะห่างตลิ่ง = ตลิ่งอินทร์บุรี - float(wl)
+            if ระยะห่างตลิ่ง <= 1.50:
+                final_post = final_post.replace("ยังพอสบายใจได้อยู่", "ต้องเฝ้าระวังใกล้ชิด")
+                final_post = final_post.replace("พอสบายใจได้", "อย่าเพิ่งวางใจ")
+                final_post = final_post.replace("สบายใจได้", "อย่าเพิ่งวางใจ")
+                final_post = final_post.replace("ไม่ต้องห่วง", "ขอให้ติดตามต่อเนื่อง")
+                final_post = final_post.replace("ไม่ต้องกังวล", "ขอให้ติดตามต่อเนื่อง")
+                final_post = final_post.replace("ปกติดี", "ยังไม่มีอะไรผิดปกติ")
+                final_post = final_post.replace("วางใจได้", "ยังพอมีเวลาเตรียมตัว")
+                print(f"🧹 น้ำเหลือถึงตลิ่ง {ระยะห่างตลิ่ง:.2f} ม. — ตัดคำปลอบใจออกแล้ว")
     except Exception as e:
-        print(f"❌ AI เขียนโพสต์ไม่สำเร็จ: {e}")
-        if POST_TEMPLATE_ON_AI_FAIL:
-            final_post = ai_brain.template_post(facts, analysis, header)
+        print(f"⚠️ Guard check error: {e}")
+    # ───────────────────────────────────────────────────────────────
 
-    if final_post:
-        final_post = final_post.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
-    print("\nข้อความที่จะโพสต์:\n", final_post)
-
-    # ── 5) โพสต์ + จดจำ ──
-    if DRY_RUN:
-        print("\n🧪 DRY_RUN: ไม่ส่ง webhook / ไม่บันทึกความจำโพสต์")
-    elif MAKE_WEBHOOK_URL and final_post:
-        res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post}, timeout=30)
+    if MAKE_WEBHOOK_URL and final_post and "ขัดข้องชั่วคราว" not in final_post:
+        res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post})
         if res.status_code == 200:
             print("\n✅ ส่ง Webhook สำเร็จ!")
-            new_state = ai_brain.remember_post(new_state, final_post, analysis, facts, f"{date_str} {time_str}")
-            save_state(new_state)
-        else:
-            print(f"\n❌ Webhook ล้มเหลว HTTP {res.status_code}")
