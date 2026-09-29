@@ -349,15 +349,21 @@ def _is_auth_error(e):
             or "API_KEY_INVALID" in t or "API key not valid" in t)
 
 
-def _pick(combos):
+MAX_QUOTA_WAIT = int(os.environ.get("MAX_QUOTA_WAIT", "150"))   # วินาที: รอโควตารวมต่อการเรียก 1 ครั้ง ถ้าเกินให้ยอมแพ้
+
+
+def _pick(combos, waited=None):
     now = time.time()
     live = [c for c in combos if _COOLDOWN.get(c[3], 0) <= now]
     if live:
         return live[0]
     soonest = min(_COOLDOWN[c[3]] for c in combos)
-    if soonest - now <= 70:           # โดนแค่ limit ต่อนาที รอแป๊บเดียวแล้วลองใหม่
-        time.sleep(soonest - now + 1)
-        return _pick(combos)
+    wait = soonest - now
+    if wait <= 70 and (waited is None or waited[0] + wait + 1 <= MAX_QUOTA_WAIT):
+        time.sleep(wait + 1)
+        if waited is not None:
+            waited[0] += wait + 1
+        return _pick(combos, waited)
     return None
 
 
@@ -369,8 +375,9 @@ def _gen(client, prompt, *, json_mode=False, search=False, temperature=0.7, retr
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
     combos = _combos(client)
     last, transient = None, 0
+    waited, shown = [0], set()
     while True:
-        combo = _pick(combos)
+        combo = _pick(combos, waited)
         if combo is None:
             raise RuntimeError(f"ไม่มี key/โมเดลที่ใช้ได้เลย (โควตาหมดหรือ key ผิด): {last}")
         model, tail, cl, cid = combo
@@ -384,9 +391,13 @@ def _gen(client, prompt, *, json_mode=False, search=False, temperature=0.7, retr
         except Exception as e:
             last = e
             if _is_quota_error(e):
-                daily = "perday" in str(e).lower().replace(" ", "")
+                low = str(e).lower().replace(" ", "")
+                daily = "perday" in low or "daily" in low or "limit:0" in low   # limit: 0 = โมเดลนี้ไม่มีโควตาให้ key นี้เลย
                 _COOLDOWN[cid] = time.time() + (24 * 3600 if daily else 60)
-                print(f"⏭️ โควตา{'รายวัน' if daily else 'ต่อนาที'}หมด [{model} / key {tail}] → สลับตัวถัดไป")
+                print(f"⏭️ โควตา{'รายวัน/ไม่มีสิทธิ์' if daily else 'ต่อนาที'}หมด [{model} / key {tail}] → สลับตัวถัดไป")
+                if cid not in shown:      # โชว์ข้อความจริงจาก Google ครั้งเดียวต่อ combo จะได้รู้ว่าโดน limit ตัวไหน
+                    shown.add(cid)
+                    print(f"   ↳ {str(e)[:400]}")
                 continue              # ไม่นับเป็น retry ปกติ
             if _is_auth_error(e):
                 _COOLDOWN[cid] = time.time() + 24 * 3600
