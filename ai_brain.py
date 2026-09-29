@@ -327,13 +327,14 @@ def _combos(default_client):
         return [(m, "default", default_client, (m, "default")) for m in MODELS]
     for m in MODELS:
         for k in keys:
-            if k not in _CLIENTS:
-                if k.startswith("AQ."):       # key รูปแบบ Vertex AI express ใช้กับ endpoint ปกติไม่ได้
-                    _CLIENTS[k] = genai.Client(vertexai=True, api_key=k)
-                else:
-                    _CLIENTS[k] = genai.Client(api_key=k)
-            tail = "…" + k[-4:]       # log เฉพาะ 4 ตัวท้าย ห้ามพิมพ์ key เต็ม
-            combos.append((m, tail, _CLIENTS[k], (m, tail)))
+            # key รูปแบบ AQ. ยังไม่แน่ใจว่าเป็นของ Gemini API (AI Studio) หรือ Vertex จึงลองทั้งสองทาง
+            modes = ["gemini", "vertex"] if k.startswith("AQ.") else ["gemini"]
+            for mode in modes:
+                if (k, mode) not in _CLIENTS:
+                    _CLIENTS[(k, mode)] = (genai.Client(vertexai=True, api_key=k)
+                                           if mode == "vertex" else genai.Client(api_key=k))
+                tail = f"…{k[-4:]}/{mode}"   # log เฉพาะ 4 ตัวท้าย ห้ามพิมพ์ key เต็ม
+                combos.append((m, tail, _CLIENTS[(k, mode)], (m, tail)))
     return combos
 
 
