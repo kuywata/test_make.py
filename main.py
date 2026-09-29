@@ -1074,7 +1074,7 @@ def get_historical_water_data(target_date):
 import ai_brain
 
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"                       # 1 = ไม่ส่ง webhook
-POST_TEMPLATE_ON_AI_FAIL = os.environ.get("POST_TEMPLATE_ON_AI_FAIL", "0") == "1"
+POST_TEMPLATE_ON_AI_FAIL = os.environ.get("POST_TEMPLATE_ON_AI_FAIL", "1") != "0"
 
 if __name__ == "__main__":
     print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี ===")

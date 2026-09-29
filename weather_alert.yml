@@ -35,6 +35,7 @@ jobs:
       - name: Run Alert Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}   # หลาย key คั่นด้วย ,
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
         run: python alert.py

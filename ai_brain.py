@@ -20,6 +20,8 @@ import openpyxl
 from google.genai import types
 
 MODEL = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+# ลำดับโมเดลที่จะลอง (โควตาฟรีนับแยกตามโมเดล ตัวแรกหมดก็ไหลไปตัวถัดไป)
+MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", f"{MODEL},gemini-2.5-flash-lite").split(",") if m.strip()]
 ENABLE_RESEARCH = os.environ.get("ENABLE_RESEARCH", "1") != "0"
 
 # ───────── ค่าที่ปรับได้ ─────────
@@ -249,25 +251,84 @@ def assess_water_risk(ctx):
 # ═════════════════════════════════════════════
 # เรียก Gemini
 # ═════════════════════════════════════════════
+# ── สลับหลาย API key / หลายโมเดล เมื่อโควตาหมด ──
+_CLIENTS = {}     # api_key -> genai.Client
+_COOLDOWN = {}    # (model, key_tail) -> เวลา (epoch) ที่จะกลับมาใช้ได้
+
+
+def _load_keys():
+    """อ่าน key จาก GEMINI_API_KEYS (คั่นด้วย , หรือขึ้นบรรทัดใหม่) + GEMINI_API_KEY เดิม"""
+    keys = [k.strip() for k in re.split(r"[,\s]+", os.environ.get("GEMINI_API_KEYS", "")) if k.strip()]
+    single = (os.environ.get("GEMINI_API_KEY") or "").strip()
+    if single and single not in keys:
+        keys.append(single)
+    return keys
+
+
+def _combos(default_client):
+    from google import genai
+    combos = []
+    keys = _load_keys()
+    if not keys:                      # ไม่มี env เลย ใช้ client ที่ส่งเข้ามา
+        return [(m, "default", default_client, (m, "default")) for m in MODELS]
+    for m in MODELS:
+        for k in keys:
+            if k not in _CLIENTS:
+                _CLIENTS[k] = genai.Client(api_key=k)
+            tail = "…" + k[-4:]       # log เฉพาะ 4 ตัวท้าย ห้ามพิมพ์ key เต็ม
+            combos.append((m, tail, _CLIENTS[k], (m, tail)))
+    return combos
+
+
+def _is_quota_error(e):
+    t = str(e)
+    return getattr(e, "code", None) == 429 or "429" in t or "RESOURCE_EXHAUSTED" in t
+
+
+def _pick(combos):
+    now = time.time()
+    live = [c for c in combos if _COOLDOWN.get(c[3], 0) <= now]
+    if live:
+        return live[0]
+    soonest = min(_COOLDOWN[c[3]] for c in combos)
+    if soonest - now <= 70:           # โดนแค่ limit ต่อนาที รอแป๊บเดียวแล้วลองใหม่
+        time.sleep(soonest - now + 1)
+        return _pick(combos)
+    return None
+
+
 def _gen(client, prompt, *, json_mode=False, search=False, temperature=0.7, retries=3):
     cfg = {"temperature": temperature}
     if json_mode:
         cfg["response_mime_type"] = "application/json"
     if search:
         cfg["tools"] = [types.Tool(google_search=types.GoogleSearch())]
-    last = None
-    for i in range(retries):
+    combos = _combos(client)
+    last, transient = None, 0
+    while True:
+        combo = _pick(combos)
+        if combo is None:
+            raise RuntimeError(f"Gemini โควตาหมดทุก key/โมเดลแล้ว: {last}")
+        model, tail, cl, cid = combo
         try:
-            resp = client.models.generate_content(
-                model=MODEL, contents=prompt, config=types.GenerateContentConfig(**cfg))
+            resp = cl.models.generate_content(
+                model=model, contents=prompt, config=types.GenerateContentConfig(**cfg))
             txt = (resp.text or "").strip()
             if txt:
                 return txt, resp
+            last = "ตอบว่างเปล่า"
         except Exception as e:
             last = e
-            print(f"⚠️ Gemini error ({i+1}/{retries}): {e}")
-        time.sleep(5 * (2 ** i))
-    raise RuntimeError(f"Gemini ล้มเหลว: {last}")
+            if _is_quota_error(e):
+                daily = "perday" in str(e).lower().replace(" ", "")
+                _COOLDOWN[cid] = time.time() + (24 * 3600 if daily else 60)
+                print(f"⏭️ โควตา{'รายวัน' if daily else 'ต่อนาที'}หมด [{model} / key {tail}] → สลับตัวถัดไป")
+                continue              # ไม่นับเป็น retry ปกติ
+            print(f"⚠️ Gemini error [{model} / key {tail}] ({transient+1}/{retries}): {e}")
+        transient += 1
+        if transient >= retries:
+            raise RuntimeError(f"Gemini ล้มเหลว: {last}")
+        time.sleep(5 * (2 ** (transient - 1)))
 
 
 def _json_loads(txt):
@@ -565,8 +626,7 @@ def template_post(facts, analysis, header):
 
     lines.append("")
     lines.append(f"📌 **สรุป:** ระดับความเสี่ยงตอนนี้ = {analysis['level_label']} "
-                 f"(ระบบตรวจพบว่าข้อมูลข่าวที่ AI ร่างมาไม่ผ่านการตรวจสอบซ้ำ จึงตัดส่วนวิเคราะห์/ข่าวออก "
-                 f"เหลือเฉพาะตัวเลขที่ยืนยันได้ ขอให้ติดตามประกาศทางการเพิ่มเติมด้วยตัวเอง)")
+                 f"(รอบนี้สรุปเฉพาะตัวเลขที่ยืนยันได้ ขอให้ติดตามประกาศทางการเพิ่มเติมด้วย)")
     return "\n".join(lines)
 
 
