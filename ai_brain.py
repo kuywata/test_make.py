@@ -373,12 +373,18 @@ def analyze(client, facts, risk, research_text, prev_post):
 # ═════════════════════════════════════════════
 # 5) เขียนโพสต์
 # ═════════════════════════════════════════════
-def write_post(client, facts, analysis, research_text, prev_post, header, has_fire, feedback=None):
+def write_post(client, facts, analysis, research_text, prev_post, header, has_fire, feedback=None, suppress_news=False):
     lvl = analysis["level"]
     fire_line = ("🔥 **เฝ้าระวังความร้อน:** (พูดว่า 'ควันจากการเผาไร่/นา' ห้ามพูดว่าไฟป่า)\n" if has_fire else "")
     fb = ""
     if feedback:
         fb = "\n⚠️ ร่างก่อนหน้าไม่ผ่านการตรวจ ต้องแก้ให้ได้ดังนี้:\n- " + "\n- ".join(feedback) + "\n"
+    news_rule = ("8. ตัดหัวข้อ 📰 ออกทั้งหมดในรอบนี้ ไม่ต้องพูดถึงข่าว/ประกาศใดๆ เลย (รอบก่อนแต่งข่าวผิดซ้ำ ครั้งนี้เขียนจากข้อมูลจริงล้วนๆ พอ)"
+                 if suppress_news else
+                 """8. ถ้ามี news_points ให้ใส่หัวข้อ 📰 สั้นๆ พร้อมชื่อหน่วยงานและวันที่ ถ้าไม่มีให้ข้ามหัวข้อนี้ทั้งหมด
+   ห้ามกุข่าว ห้ามเสริมตัวเลข/แผนงาน/ชื่อหน่วยงานที่ไม่ได้อยู่ในข้อความ "ข่าว/ประกาศล่าสุดที่ค้นมา" ตรงตัว
+   แต่ละบรรทัดในหัวข้อ 📰 ต้องสรุปมาจากสิ่งที่ค้นเจอเท่านั้น ถ้าค้นไม่เจออะไรเลยหรือไม่แน่ใจ ห้ามใส่หัวข้อนี้เด็ดขาด
+   ดีกว่าใส่ข่าวที่ไม่มีแหล่งจริง เพราะเพจนี้พูดเรื่องภัยพิบัติ ถ้าข้อมูลผิดจะทำให้คนไม่เชื่อและอาจตัดสินใจผิดพลาด""")
     prompt = f"""คุณคือแอดมินเพจ "อินทร์บุรีรอดมั้ย" เขียนโพสต์ให้ชาวบ้านอ่านแบบ "คุยกัน" เหมือนเพื่อนบ้านที่ตามน้ำมาตลอด
 และอธิบายให้ฟังว่า "ตัวเลขนี้แปลว่าอะไรกับเรา" ไม่ใช่แค่อ่านตัวเลข
 
@@ -388,7 +394,7 @@ def write_post(client, facts, analysis, research_text, prev_post, header, has_fi
 ผลวิเคราะห์ (ยึดตามนี้):
 {json.dumps(analysis, ensure_ascii=False, indent=1)}
 
-ข่าว/ประกาศล่าสุดที่ค้นมา: {research_text or '(ไม่มี)'}
+ข่าว/ประกาศล่าสุดที่ค้นมา: {"(ไม่ต้องใช้รอบนี้)" if suppress_news else (research_text or "(ไม่มี)")}
 โพสต์รอบก่อน (อย่าซ้ำสำนวน): {json.dumps(prev_post, ensure_ascii=False) if prev_post else '(ไม่มี)'}
 
 ระดับความเสี่ยงที่ยืนยันแล้ว: {analysis['level_label']} → น้ำเสียง: {LEVEL_INFO[lvl]['tone']}
@@ -398,15 +404,13 @@ def write_post(client, facts, analysis, research_text, prev_post, header, has_fi
 2. ทุกตัวเลขสำคัญต้องมีประโยค "แปลว่า…" ต่อท้าย เช่น เหลืออีกกี่เมตรจะล้นตลิ่ง / ต่างจากปีที่แล้วกี่เมตร
 3. เทียบปีที่แล้ว: บอกส่วนต่างเป็นเมตร + เล่าด้วยว่าปีที่แล้วหลังช่วงนี้น้ำไปถึงไหน (ถ้ามีข้อมูล) ห้ามใช้ "ต่ำกว่าปีที่แล้ว" เป็นเหตุผลว่าปลอดภัย
 4. เทียบ "เมื่อวาน" ได้เฉพาะถ้ามี change_24h ในข้อมูล ถ้าไม่มีให้ไม่พูดถึง
-5. ห้ามบอกว่าฝนกำลังตก/ฝนปรอย ถ้า rain_now_confirmed เป็น false ให้พูดเป็น "โอกาสฝน" หรือ "เสี่ยงมีฝน"
-6. ระบายน้ำเขื่อน: ใช้ตัวเลขของอินทร์บุรี/เขื่อนเจ้าพระยาเท่านั้น โพนางดำพูดได้เฉพาะระดับน้ำ/ระยะห่างตลิ่งของ "ปีที่แล้ว" และต้องบอกชัดว่าเป็นข้อมูลปีที่แล้ว ห้ามใส่ตัวเลขระบายน้ำของโพนางดำ
-7. ฝุ่น: ใช้ถ้อยคำให้ตรงกับระดับ (pm25.instruction) ห้ามเขียนว่าอากาศดีถ้าระดับไม่ใช่ดี/ดีมาก
-8. ถ้ามี news_points ให้ใส่หัวข้อ 📰 สั้นๆ พร้อมชื่อหน่วยงานและวันที่ ถ้าไม่มีให้ข้ามหัวข้อนี้ทั้งหมด
-   ห้ามกุข่าว ห้ามเสริมตัวเลข/แผนงาน/ชื่อหน่วยงานที่ไม่ได้อยู่ในข้อความ "ข่าว/ประกาศล่าสุดที่ค้นมา" ตรงตัว
-   แต่ละบรรทัดในหัวข้อ 📰 ต้องสรุปมาจากสิ่งที่ค้นเจอเท่านั้น ถ้าค้นไม่เจออะไรเลยหรือไม่แน่ใจ ห้ามใส่หัวข้อนี้เด็ดขาด
-   ดีกว่าใส่ข่าวที่ไม่มีแหล่งจริง เพราะเพจนี้พูดเรื่องภัยพิบัติ ถ้าข้อมูลผิดจะทำให้คนไม่เชื่อและอาจตัดสินใจผิดพลาด
+5. ห้ามบอกว่าฝนกำลังตก/ฝนปรอย ถ้า rain_now_confirmed เป็น false ให้พูดเป็น "โอกาสฝน" หรือ "เสี่ยงมีฝน" และห้ามเปลี่ยนตัวเลขเปอร์เซ็นต์โอกาสฝนจากที่ให้มา (max_rain_prob_24h_pct) เป็นค่าอื่น
+6. ระบายน้ำเขื่อน: ใช้ตัวเลขของอินทร์บุรี/เขื่อนเจ้าพระยาเท่านั้น โพนางดำพูดได้เฉพาะระดับน้ำ/ระยะห่างตลิ่งของ "ปีที่แล้ว" และต้องบอกชัดว่าเป็นข้อมูลปีที่แล้ว ห้ามใส่ตัวเลขระบายน้ำของโพนางดำ ห้ามพูดถึงตัวเลขน้ำที่นครสวรรค์หรือเหนือเขื่อนถ้าไม่มีในข้อมูลจริง
+7. ฝุ่น: ใช้ถ้อยคำให้ตรงกับระดับ (pm25.instruction) ห้ามเขียนว่าอากาศดีถ้าระดับไม่ใช่ดี/ดีมาก ห้ามอ้างค่าฝุ่นของวันก่อนถ้าไม่มีในข้อมูล
+{news_rule}
 9. ทักทายตามวัน{facts['now']['weekday']} และช่วง{facts['now']['period']}จริงๆ ห้ามเดาเอง
-10. ปิดด้วย 📌 สรุป + สิ่งที่ทำได้จริง 1-2 ข้อ (จาก advice) ความยาวรวมไม่เกิน ~1,600 ตัวอักษร ห้ามใส่ hashtag
+10. อย่าเรียกสถานการณ์ว่า "ล้นตลิ่งแล้ว" ถ้า gap_to_bank ยังเป็นบวก (ยังไม่ถึง 0) ให้พูดว่า "ใกล้ตลิ่งมาก เหลืออีก X เมตร" แทน คำว่า "ล้นตลิ่ง"/"overbank" ในผลวิเคราะห์หมายถึงระดับความเสี่ยงสูงสุด ไม่ได้แปลว่าน้ำล้นจริงแล้วเสมอไป
+11. ปิดด้วย 📌 สรุป + สิ่งที่ทำได้จริง 1-2 ข้อ (จาก advice) ความยาวรวมไม่เกิน ~1,600 ตัวอักษร ห้ามใส่ hashtag
 
 โครงสร้าง (หัวข้อไหนไม่มีข้อมูลให้ข้าม):
 {header}
@@ -415,7 +419,7 @@ def write_post(client, facts, analysis, research_text, prev_post, header, has_fi
 {fire_line}🌧️ **เฝ้าระวังฝนและพายุ:** …
 🌊 **ระดับน้ำอินทร์บุรี:** …
 🛑 **ระบายน้ำเขื่อนเจ้าพระยาและโพนางดำ:** …
-📰 **ข่าวล่าสุดที่เช็กมา:** …(ถ้ามี)
+{"" if suppress_news else "📰 **ข่าวล่าสุดที่เช็กมา:** …(ถ้ามี)" }
 📌 **สรุป:** …"""
     txt, _ = _gen(client, prompt, temperature=0.9)
     return txt
@@ -500,32 +504,76 @@ def strip_unverified_news(post, research_text):
 
 
 def template_post(facts, analysis, header):
-    w = facts["water"]
-    gap = w.get("gap_to_bank")
+    """เทมเพลตสำรอง 100% จากโค้ด (ไม่ผ่าน AI เลย จึงมั่วไม่ได้) ใช้ตอนที่ AI เขียนไม่ผ่านการตรวจซ้ำๆ
+    ต้องใส่ให้ครบทุกหมวดเท่าที่มีข้อมูลจริง ห้ามใส่แค่บางส่วนแล้วทำเหมือนข้อมูลอื่นไม่มี"""
     lines = [header, ""]
+
+    w8 = facts.get("weather") or {}
+    pm = facts.get("pm25") or {}
+    if w8.get("temp_c") is not None or pm.get("value") is not None:
+        seg = []
+        if w8.get("temp_c") is not None:
+            seg.append(f"อุณหภูมิ {w8['temp_c']} องศา")
+        if w8.get("humidity_pct") is not None:
+            seg.append(f"ความชื้น {w8['humidity_pct']}%")
+        if pm.get("value") is not None:
+            seg.append(f"PM2.5 {pm['value']} ไมโครกรัม/ลบ.ม. ({pm.get('level','-')})")
+        lines.append("🌡️ **สภาพอากาศและฝุ่น:** " + " · ".join(seg))
+
+    hs = facts.get("hotspots") or {}
+    if isinstance(hs.get("count"), int) and hs["count"] > 0:
+        lines.append(f"🔥 **จุดความร้อน/ควันจากการเผา:** ตรวจพบ {hs['count']} จุดในพื้นที่เฝ้าระวัง")
+
+    rs = facts.get("rain_storm") or {}
+    if rs.get("max_rain_prob_24h_pct") is not None or rs.get("summary"):
+        seg = []
+        if rs.get("max_rain_prob_24h_pct") is not None:
+            seg.append(f"โอกาสฝนสูงสุดใน 24 ชม. {rs['max_rain_prob_24h_pct']:.0f}%")
+        if rs.get("summary"):
+            seg.append(str(rs["summary"]))
+        lines.append("🌧️ **เฝ้าระวังฝนและพายุ:** " + " · ".join(seg))
+
+    w = facts.get("water") or {}
+    gap = w.get("gap_to_bank")
     if w.get("wl") is not None:
         if gap is None:
             gtxt = "ไม่ทราบระยะห่างจากตลิ่ง"
         elif gap < 0:
-            gtxt = f"ล้นตลิ่ง {abs(gap):.2f} เมตร"
+            gtxt = f"ล้นตลิ่งแล้ว {abs(gap):.2f} เมตร"
         else:
             gtxt = f"ต่ำกว่าตลิ่ง {gap:.2f} เมตร"
-        lines.append(f"🌊 **ระดับน้ำอินทร์บุรี:** {w['wl']:.2f} เมตร ({gtxt})")
+        wline = f"🌊 **ระดับน้ำอินทร์บุรี:** {w['wl']:.2f} เมตร ({gtxt})"
         if w.get("change_24h") is not None:
-            lines.append(f"เทียบเมื่อวาน {w['change_24h']:+.2f} เมตร")
+            wline += f" เทียบเมื่อวาน {w['change_24h']:+.2f} เมตร"
+        lines.append(wline)
         ly = w.get("last_year")
         if ly:
-            lines.append(f"ปีที่แล้ววันใกล้เคียง ({ly['date']}) น้ำ {ly['wl']} เมตร")
+            lines.append(f"เทียบปีที่แล้ว ({ly['date']}) น้ำอยู่ที่ {ly['wl']} เมตร "
+                         f"ห่างตลิ่ง {ly['gap_to_bank']} เมตร")
+            pk = ly.get("next_30d_peak")
+            if pk:
+                lines.append(f"ปีที่แล้วหลังวันนี้ น้ำขึ้นไปสูงสุด {pk['wl']} เมตร เมื่อ {pk['date']}")
+
+    seg = []
     if w.get("discharge") is not None:
-        lines.append(f"🛑 **เขื่อนเจ้าพระยาระบาย:** {w['discharge']:g} ลบ.ม./วินาที")
-    lines.append(f"📌 **สรุป:** ระดับความเสี่ยงตอนนี้ = {analysis['level_label']} ขอให้ติดตามประกาศทางการต่อเนื่อง")
+        seg.append(f"เขื่อนเจ้าพระยาระบาย {w['discharge']:g} ลบ.ม./วินาที")
+    pn = w.get("phonangdam_last_year")
+    if pn:
+        seg.append(f"โพนางดำปีที่แล้ว ({pn['date']}) น้ำ {pn['wl']} เมตร ห่างตลิ่ง {pn['gap_to_bank']} เมตร")
+    if seg:
+        lines.append("🛑 **ระบายน้ำเขื่อนเจ้าพระยาและโพนางดำ:** " + " · ".join(seg))
+
+    lines.append("")
+    lines.append(f"📌 **สรุป:** ระดับความเสี่ยงตอนนี้ = {analysis['level_label']} "
+                 f"(ระบบตรวจพบว่าข้อมูลข่าวที่ AI ร่างมาไม่ผ่านการตรวจสอบซ้ำ จึงตัดส่วนวิเคราะห์/ข่าวออก "
+                 f"เหลือเฉพาะตัวเลขที่ยืนยันได้ ขอให้ติดตามประกาศทางการเพิ่มเติมด้วยตัวเอง)")
     return "\n".join(lines)
 
 
 def review_and_fix(client, post, facts, analysis, research_text, prev_post, header, has_fire, max_fix=2):
     problems = ["ยังไม่ได้ตรวจ"]   # กันไว้เผื่อ loop ไม่เข้าเลย (ไม่เกิดขึ้นจริงเพราะ range(max_fix+1)>=1)
+    news_strikes = 0   # นับจำนวนครั้งที่ปัญหาเกี่ยวกับ "ข่าว" -> ถ้าเจอซ้ำ ให้สั่งตัดข่าวทิ้งเลยแทนขอให้แก้เอง
     for attempt in range(max_fix + 1):
-        removed = []
         post, removed = strip_unverified_news(post, research_text)
         if removed:
             print(f"✂️ ตัดข่าวที่ไม่มีในผลค้นหาออก {len(removed)} ข้อ: {removed}")
@@ -538,9 +586,11 @@ def review_and_fix(client, post, facts, analysis, research_text, prev_post, head
         print(f"🧪 review รอบ {attempt+1}: {problems}")
         if attempt == max_fix:
             break
+        if any("ข่าว" in p for p in problems):
+            news_strikes += 1
         try:
             post = write_post(client, facts, analysis, research_text, prev_post, header,
-                              has_fire, feedback=problems)
+                              has_fire, feedback=problems, suppress_news=(news_strikes >= 1))
         except Exception as e:
             print(f"⚠️ เขียนใหม่ไม่สำเร็จ: {e}")
             break
