@@ -890,6 +890,44 @@ def get_inburi_data():
     st = get_water_stations(("อินทร์บุรี",))
     return st.get("อินทร์บุรี"), 13.00
 
+def get_phonangdam_from_hii():
+    """สำรอง: หาโพนางดำใน JSON ของ HII (หน้าเดียวกับที่ดึงเขื่อนเจ้าพระยา) รับเฉพาะฟิลด์ระดับน้ำที่ชัดเจน
+    ถ้าไม่เจอจะพิมพ์โครงสร้างลง log เพื่อให้รู้ว่าต้องชี้ไปฟิลด์ไหน"""
+    try:
+        res = requests.get(
+            f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php"
+            f"?cb={random.randint(10000, 99999)}", timeout=20)
+        mt = re.search(r'var json_data = (\[.*\]);', res.text)
+        if not mt:
+            print("ℹ️ HII: ไม่พบ json_data")
+            return None
+        data = json.loads(mt.group(1))
+        hits = []
+        def walk(o, path):
+            if isinstance(o, dict):
+                if any(isinstance(v, str) and "โพนางดำ" in v for v in o.values()):
+                    hits.append((path, o))
+                for k, v in o.items():
+                    walk(v, path + [k])
+            elif isinstance(o, list):
+                for i, v in enumerate(o):
+                    walk(v, path + [i])
+        walk(data, [])
+        for path, o in hits:
+            print(f"🔎 HII พบ 'โพนางดำ' ที่ {path}: { {k: o[k] for k in list(o)[:12]} }")
+            for f in ("wl", "water_level", "level"):
+                v = o.get(f)
+                try:
+                    return float(str(v).replace(",", ""))
+                except Exception:
+                    pass
+        if not hits:
+            iw = (data[0] or {}).get("itc_water") or {}
+            print(f"ℹ️ HII ไม่พบชื่อ 'โพนางดำ' | รหัสสถานีใน itc_water: {list(iw.keys())[:60]}")
+    except Exception as e:
+        print(f"⚠️ HII โพนางดำ error: {e}")
+    return None
+
 def fetch_chao_phraya_dam_discharge():
     try:
         res = requests.get(
@@ -1104,6 +1142,8 @@ if __name__ == "__main__":
     stations = get_water_stations()
     wl, bank_level = stations.get("อินทร์บุรี"), 13.00
     pho_wl = stations.get("โพนางดำ")
+    if pho_wl is None:
+        pho_wl = get_phonangdam_from_hii()
     discharge = fetch_chao_phraya_dam_discharge()
     hotspots = get_hotspots()
     rain_info = get_comprehensive_rain_info()
