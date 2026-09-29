@@ -1,0 +1,51 @@
+name: Hourly Weather Alert
+
+on:
+  workflow_dispatch:
+  # ถ้าอยากให้รันเองทุกชั่วโมง เอาคอมเมนต์ออก (GitHub cron อาจเลื่อนได้ 5-30 นาที)
+  # schedule:
+  #   - cron: '5 * * * *'
+
+permissions:
+  contents: write            # ต้องใช้เพื่อ commit alert_state.json
+
+# ใช้ group ชื่อเดียวกันนี้ใน daily_post.yml ด้วย จะได้ไม่ commit ชนกัน
+concurrency:
+  group: repo-state
+  cancel-in-progress: false
+
+jobs:
+  check_alert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Libraries
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests google-genai pytz openpyxl
+
+      - name: Run Alert Script
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
+          TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
+        run: python alert.py
+
+      - name: Save alert state
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add alert_state.json || true
+          if ! git diff --cached --quiet; then
+            git commit -m "Update alert state"
+            git pull --rebase origin main
+            git push origin HEAD
+          fi
