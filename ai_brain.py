@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 import openpyxl
 from google.genai import types
 
-MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.6-flash")
+MODEL = os.environ.get("GEMINI_MODEL", "gemini-3.8-flash")
 # ลำดับโมเดลที่จะลอง (โควตาฟรีนับแยกตามโมเดล ตัวแรกหมดก็ไหลไปตัวถัดไป)
 MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", f"{MODEL},gemini-3.5-flash-lite").split(",") if m.strip()]
 ENABLE_RESEARCH = os.environ.get("ENABLE_RESEARCH", "1") != "0"
