@@ -876,6 +876,8 @@ def get_water_stations(names=("อินทร์บุรี", "โพนาง
                         except: continue
                     if nums:
                         found[n] = nums[0]
+                    heads = [h.get_text(strip=True) for h in soup.select("thead th")]
+                    print(f"🔍 แถว '{label}' ดิบจากเว็บ: {[td.get_text(strip=True) for td in cols]} | หัวตาราง: {heads}")
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
         finally:
@@ -888,7 +890,7 @@ def get_water_stations(names=("อินทร์บุรี", "โพนาง
 def get_inburi_data():
     """คงไว้เพื่อความเข้ากันได้กับโค้ดเดิม"""
     st = get_water_stations(("อินทร์บุรี",))
-    return st.get("อินทร์บุรี"), 13.00
+    return st.get("อินทร์บุรี"), ai_brain.BANK_LEVEL["อินทร์บุรี"]
 
 def get_phonangdam_from_hii():
     """สำรอง: หาโพนางดำใน JSON ของ HII (หน้าเดียวกับที่ดึงเขื่อนเจ้าพระยา) รับเฉพาะฟิลด์ระดับน้ำที่ชัดเจน
@@ -1140,7 +1142,7 @@ if __name__ == "__main__":
     pm25_meta = get_accurate_pm25(return_meta=True)
     pm25 = pm25_meta['pm25']
     stations = get_water_stations()
-    wl, bank_level = stations.get("อินทร์บุรี"), 13.00
+    wl, bank_level = stations.get("อินทร์บุรี"), ai_brain.BANK_LEVEL["อินทร์บุรี"]
     pho_wl = stations.get("โพนางดำ")
     if pho_wl is None:
         pho_wl = get_phonangdam_from_hii()

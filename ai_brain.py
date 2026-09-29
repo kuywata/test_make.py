@@ -25,7 +25,8 @@ MODELS = [m.strip() for m in os.environ.get("GEMINI_MODELS", f"{MODEL},gemini-2.
 ENABLE_RESEARCH = os.environ.get("ENABLE_RESEARCH", "1") != "0"
 
 # ───────── ค่าที่ปรับได้ ─────────
-BANK_LEVEL = {"อินทร์บุรี": 13.00, "โพนางดำ": 13.87}  # ยืนยันจากข้อมูลย้อนหลังจริง (ทุกแถวใน xlsx/csv)
+BANK_LEVEL = {"อินทร์บุรี": float(os.environ.get("BANK_LEVEL_INBURI", "13.00")),
+              "โพนางดำ": float(os.environ.get("BANK_LEVEL_PHONANGDAM", "13.87"))}  # ยืนยันจากข้อมูลย้อนหลังจริง (ทุกแถวใน xlsx/csv)
 GAP_HIGH = 0.50           # ต่ำกว่าตลิ่งไม่เกินนี้ (ม.) = เสี่ยงสูง
 GAP_WATCH = 1.50          # ต่ำกว่าตลิ่งไม่เกินนี้ (ม.) = เฝ้าระวัง (ห้ามใช้คำปลอบใจ)
 RISE_FAST_PER_DAY = 0.15  # น้ำขึ้นเร็วกว่านี้ (ม./วัน) -> เพิ่มระดับความเสี่ยง 1 ขั้น
@@ -388,7 +389,7 @@ def _gen(client, prompt, *, json_mode=False, search=False, temperature=0.7, retr
                 continue              # ไม่นับเป็น retry ปกติ
             if _is_auth_error(e):
                 _COOLDOWN[cid] = time.time() + 24 * 3600
-                print(f"🔑 key {tail} ใช้ไม่ได้ (ผิดชนิด/ถูกปิด) → ข้าม: {str(e)[:120]}")
+                print(f"🔑 key {tail} ใช้ไม่ได้ → ข้าม: {str(e)[:700]}")
                 continue
             print(f"⚠️ Gemini error [{model} / key {tail}] ({transient+1}/{retries}): {e}")
         transient += 1
@@ -527,18 +528,18 @@ def write_post(client, facts, analysis, research_text, prev_post, header, has_fi
 ระดับความเสี่ยงที่ยืนยันแล้ว: {analysis['level_label']} → น้ำเสียง: {LEVEL_INFO[lvl]['tone']}
 {fb}
 กฎ:
-1. ภาษาพูดง่ายๆ เป็นกันเอง เหมือนเพื่อนบ้านคุยกัน ห้ามเป็นทางการ ห้ามเขียนเป็นรายงาน ห้ามลงท้าย "ครับ/ค่ะ" ตัดศัพท์วิชาการ (ม.รทก. → เมตร) ตัวเลขน้ำเล็กๆ ให้บอกเป็นเซนติเมตรควบด้วย เช่น 0.18 เมตร (ประมาณ 18 เซนติเมตร)
-2. ทุกตัวเลขสำคัญต้องมีประโยค "แปลว่า…" ต่อท้าย เช่น เหลืออีกกี่เมตรจะล้นตลิ่ง / ต่างจากปีที่แล้วกี่เมตร
-3. เทียบปีที่แล้ว: บอกส่วนต่างเป็นเมตร + เล่าด้วยว่าปีที่แล้วหลังช่วงนี้น้ำไปถึงไหน (ถ้ามีข้อมูล) ห้ามใช้ "ต่ำกว่าปีที่แล้ว" เป็นเหตุผลว่าปลอดภัย
+1. ภาษาพูดง่ายๆ เป็นกันเอง เหมือนเพื่อนบ้านคุยกัน ห้ามเป็นทางการ ห้ามเขียนเป็นรายงาน ห้ามลงท้าย "ครับ/ค่ะ" ตัดศัพท์วิชาการ (ม.รทก. → เมตร) ตัวเลขต่างเล็กๆ (เช่นเทียบเมื่อวาน/ระยะห่างตลิ่ง) บอกเป็นเซนติเมตรอย่างเดียว ไม่ต้องเขียนซ้ำเป็นเมตร
+2. เน้นเฉพาะที่สำคัญ: ตัวเลขแต่ละตัวพูดครั้งเดียว ห้ามซ้ำ/ห้ามบอกค่าเดียวกันสองหน่วย อธิบาย "แปลว่าอะไรกับเรา" รวมเป็น 1 ประโยคต่อหัวข้อ ไม่ต้องอธิบายทุกตัวเลข
+3. เทียบปีที่แล้ว: 1-2 ประโยค บอกส่วนต่างวันนี้ + ปีที่แล้วหลังช่วงนี้น้ำขึ้นไปสูงสุดเท่าไหร่ (ถ้ามีข้อมูล) ห้ามใช้ "ต่ำกว่าปีที่แล้ว" เป็นเหตุผลว่าปลอดภัย ไม่ต้องเทียบ 7 วัน
 4. เทียบ "เมื่อวาน" ได้เฉพาะถ้ามี change_24h ในข้อมูล ถ้าไม่มีให้ไม่พูดถึง
 5. ห้ามบอกว่าฝนกำลังตก/ฝนปรอย ถ้า rain_now_confirmed เป็น false ให้พูดเป็น "โอกาสฝน" หรือ "เสี่ยงมีฝน" และห้ามเปลี่ยนตัวเลขเปอร์เซ็นต์โอกาสฝนจากที่ให้มา (max_rain_prob_24h_pct) เป็นค่าอื่น
 6. ระบายน้ำเขื่อน: ใช้ตัวเลขของเขื่อนเจ้าพระยาเท่านั้น (ถ้ามี discharge_change_24h ให้เทียบกับเมื่อวานด้วย) ห้ามใส่ตัวเลขระบายน้ำของโพนางดำ ห้ามพูดถึงตัวเลขน้ำที่นครสวรรค์หรือเหนือเขื่อนถ้าไม่มีในข้อมูลจริง
-   โพนางดำ: ถ้ามี phonangdam_now ให้เล่าให้ครบเหมือนอินทร์บุรี (ระดับตอนนี้ ห่างตลิ่งกี่เมตร เทียบเมื่อวาน/3 วัน/7 วัน เทียบปีที่แล้ว และปีที่แล้วหลังจากนั้นขึ้นไปสูงสุดเท่าไหร่) ถ้าไม่มี ให้บอกชัดๆ ว่า "วันนี้ยังดึงค่าล่าสุดของโพนางดำไม่ได้" แล้วใช้ตัวเลขปีที่แล้วเทียบเท่านั้น ห้ามข้ามหัวข้อนี้เงียบๆ โพนางดำอยู่ต้นน้ำของอินทร์บุรี พูดได้ว่าเป็นตัวช่วยดูทิศทาง แต่ห้ามเดาว่าน้ำจะมาถึงกี่ชั่วโมง
+   โพนางดำ: 1 ประโยคสั้นๆ ถ้ามี phonangdam_now (ระดับตอนนี้ + ห่าง/ล้นตลิ่ง + เทียบเมื่อวานหรือปีที่แล้วอย่างใดอย่างหนึ่ง) ถ้าไม่มี ให้บอกสั้นๆ ว่า "วันนี้ยังไม่มีค่าล่าสุด" พร้อมตัวเลขปีที่แล้ว ห้ามข้ามหัวข้อเงียบๆ ห้ามเดาเวลาที่น้ำจะมาถึง
 7. ฝุ่น: ใช้ถ้อยคำให้ตรงกับระดับ (pm25.instruction) ห้ามเขียนว่าอากาศดีถ้าระดับไม่ใช่ดี/ดีมาก ห้ามอ้างค่าฝุ่นของวันก่อนถ้าไม่มีในข้อมูล
 {news_rule}
 9. ทักทายตามวัน{facts['now']['weekday']} และช่วง{facts['now']['period']}จริงๆ ห้ามเดาเอง
 10. อย่าเรียกสถานการณ์ว่า "ล้นตลิ่งแล้ว" ถ้า gap_to_bank ยังเป็นบวก (ยังไม่ถึง 0) ให้พูดว่า "ใกล้ตลิ่งมาก เหลืออีก X เมตร" แทน คำว่า "ล้นตลิ่ง"/"overbank" ในผลวิเคราะห์หมายถึงระดับความเสี่ยงสูงสุด ไม่ได้แปลว่าน้ำล้นจริงแล้วเสมอไป
-11. ปิดด้วย 📌 สรุป + สิ่งที่ทำได้จริง 1-2 ข้อ (จาก advice) ความยาวรวมไม่เกิน ~2,200 ตัวอักษร ห้ามใส่ hashtag ให้ละเอียดกว่าเพจอื่น: มีเปรียบเทียบ "ตอนนี้ vs เมื่อวาน vs ปีที่แล้ว" ทั้งอินทร์บุรีและโพนางดำ พร้อมประโยค "แปลว่า…" ทุกครั้ง
+11. ปิดด้วย 📌 สรุป 1 ประโยค + สิ่งที่ทำได้จริง 1-2 ข้อ ความยาวรวมไม่เกิน ~900 ตัวอักษร (อ่านจบใน 20 วินาที) ห้ามใส่ hashtag เขียนเป็นย่อหน้าสั้นๆ อ่านลื่นเหมือนคนเล่า ไม่ใช่รายงานตัวเลข
 12. วันที่ทุกที่ต้องเขียนเป็น วัน เดือน ปี แบบไทย เช่น 29 กันยายน 2568 (ปีเป็น พ.ศ.) ห้ามใช้รูปแบบ 2025-09-29 หรือปี ค.ศ. เด็ดขาด
 
 โครงสร้าง (หัวข้อไหนไม่มีข้อมูลให้ข้าม):
@@ -570,6 +571,8 @@ def rule_check(post, analysis, facts):
         problems.append("มีคำลงท้าย ครับ/ค่ะ")
     if re.search(r"\d{4}-\d{2}-\d{2}", post):
         problems.append("ใช้วันที่แบบ 2025-09-29 ต้องเขียนเป็น วัน เดือน ปี แบบไทย (พ.ศ.) เช่น 29 กันยายน 2568")
+    if len(post) > 1300:
+        problems.append(f"ยาวเกินไป ({len(post)} ตัวอักษร) ตัดให้เหลือไม่เกิน ~900 เก็บเฉพาะที่สำคัญ ตัวเลขห้ามซ้ำ")
     if "โพนางดำ" not in post:
         problems.append("ไม่มีหัวข้อโพนางดำ ต้องเล่าให้ครบ (ถ้าไม่มีค่าปัจจุบัน ให้บอกว่ายังดึงไม่ได้ + เทียบปีที่แล้ว)")
     wl = facts.get("water", {}).get("wl")
@@ -641,130 +644,112 @@ def _m(v):
     return f"{v:.2f}".rstrip("0").rstrip(".") if isinstance(v, (int, float)) else str(v)
 
 
-def _delta_words(d):
-    if d is None:
-        return None
-    if abs(d) < 0.005:
-        return "เท่าเดิม"
-    return f"{'สูงขึ้น' if d > 0 else 'ลดลง'} {abs(d):.2f} เมตร (ประมาณ {abs(d)*100:.0f} เซนติเมตร)"
+def _cm(d):
+    return f"{abs(d) * 100:.0f} เซนติเมตร"
 
 
-def _gap_words(gap, past=False):
-    if gap is None:
-        return "ไม่ทราบระยะห่างจากตลิ่ง"
-    if gap < 0:
-        return f"ล้นตลิ่ง{'' if past else 'แล้ว'} {abs(gap):.2f} เมตร"
-    if gap == 0:
-        return "ระดับเท่ากับตลิ่งพอดี"
-    return f"ต่ำกว่าตลิ่งอีก {gap:.2f} เมตร (ประมาณ {gap*100:.0f} เซนติเมตร)"
+def _no_time(t):
+    return re.sub(r" เวลา \d{2}:\d{2} น\.", "", t or "")
 
 
-def _vs_last_year(now_wl, ly, hot):
-    """ประโยคเทียบปีที่แล้ว + ปีที่แล้วหลังจากนั้นเกิดอะไรขึ้น (ไม่ใช้ 'ต่ำกว่าปีที่แล้ว' เป็นเหตุผลว่าปลอดภัย)"""
-    out = []
+def _short_date(t):
+    """'20 ตุลาคม 2568 เวลา 20:13 น.' -> '20 ตุลาคม' (ตัดปีและเวลา ให้สั้น)"""
+    return re.sub(r" \d{4}$", "", _no_time(t))
+
+
+def _station_line(icon, name, st, last_year=None):
+    """ประโยคเดียวต่อสถานี: ระดับ + ห่าง/ล้นตลิ่ง + เทียบเมื่อวาน (+3 วันถ้าขึ้น/ลงชัด)"""
+    gap = st.get("gap_to_bank")
+    s = f"{icon} {name}ตอนนี้ **{st['wl']:.2f} เมตร**"
+    if gap is not None:
+        if gap > 0:
+            s += f" ห่างตลิ่งอีก {_cm(gap)}"
+        elif gap < 0:
+            s += f" ล้นตลิ่งแล้ว {abs(gap):.2f} เมตร"
+        else:
+            s += " ถึงตลิ่งพอดี"
+    c24, c3 = st.get("change_24h"), st.get("change_3d")
+    if c24 is not None:
+        s += " เท่าเมื่อวาน" if abs(c24) < 0.005 else f" {'ขึ้น' if c24 > 0 else 'ลง'}จากเมื่อวาน {_cm(c24)}"
+        if c3 is not None and abs(c3) >= 0.05:
+            s += f" (3 วันที่ผ่านมา{'ขึ้น' if c3 > 0 else 'ลง'}รวม {_cm(c3)})"
+    return s
+
+
+def _last_year_line(now_wl, ly, hot):
+    """ปีที่แล้ว: ระดับวันเดียวกัน + ส่วนต่าง + ปีที่แล้วหลังจากนั้นสูงสุดเท่าไหร่ (เลขไม่ซ้ำกับบรรทัดบน)"""
+    s = f"📅 ปีที่แล้ววันเดียวกันน้ำ {_m(ly['wl'])} เมตร"
+    if ly.get("gap_to_bank", 1) < 0:
+        s += " (ล้นตลิ่งแล้ว)"
     diff = ly.get("this_year_minus_last_year")
     if diff is None and now_wl is not None:
         diff = round(now_wl - ly["wl"], 2)
-    rel = ""
-    if diff is not None:
-        rel = ("ปีนี้เท่ากับปีที่แล้ว" if abs(diff) < 0.005 else
-               f"ปีนี้{'สูงกว่า' if diff > 0 else 'ต่ำกว่า'}ปีที่แล้ว {abs(diff):.2f} เมตร")
-    out.append(f"   ↳ เทียบปีที่แล้ว ({ly['date']}) น้ำอยู่ที่ {_m(ly['wl'])} เมตร ({_gap_words(ly['gap_to_bank'], True)}) {rel}".rstrip())
+    if diff is not None and abs(diff) >= 0.005:
+        s += f" ปีนี้{'สูงกว่า' if diff > 0 else 'ต่ำกว่า'} {_cm(diff)}"
     pk = ly.get("next_30d_peak")
     if pk:
-        out.append(f"   ↳ ปีที่แล้วหลังจากช่วงนี้ น้ำขึ้นไปสูงสุด {_m(pk['wl'])} เมตร เมื่อ {pk['date']} ({_gap_words(pk['gap_to_bank'], True)})"
-                   + (" ปีนี้จึงยังวางใจไม่ได้ ต้องดูต่อทุกวัน" if hot else ""))
-    return out
-
-
-def _trend_lines(w):
-    out = []
-    for key, label in (("24h", "เมื่อวาน"), ("3d", "3 วันก่อน"), ("7d", "7 วันก่อน")):
-        t = _delta_words(w.get(f"change_{key}"))
-        if t:
-            out.append(f"   ↳ เทียบกับ{label}: {t}")
-    if not out and w.get("change_since_last_run") is not None:
-        out.append(f"   ↳ เทียบรอบที่แล้ว: {_delta_words(w['change_since_last_run'])}")
-    return out
+        s += f" และหลังจากนั้นปีที่แล้วขึ้นไปสูงสุด {_m(pk['wl'])} เมตร ช่วง {_short_date(pk['date'])}"
+        if hot:
+            s += " จึงยังวางใจไม่ได้"
+    return s
 
 
 def template_post(facts, analysis, header):
-    """เทมเพลตสำรอง 100% จากโค้ด (ไม่ผ่าน AI จึงมั่วไม่ได้) ใช้ตอน AI ใช้ไม่ได้/เขียนไม่ผ่านการตรวจซ้ำๆ
-    เขียนเป็นภาษาชาวบ้าน มีเทียบเมื่อวาน/ปีที่แล้ว ครบทั้งอินทร์บุรี เขื่อน และโพนางดำ"""
+    """เทมเพลตสำรอง 100% จากโค้ด (ไม่ผ่าน AI จึงมั่วไม่ได้) สั้น อ่านง่าย เลือกเฉพาะที่สำคัญ"""
     lines = [header, ""]
     w = facts.get("water") or {}
     hot = analysis["level"] in ("watch", "high", "overbank")
-
-    # ── น้ำอินทร์บุรี ──
     gap = w.get("gap_to_bank")
+
     if w.get("wl") is not None:
-        lines.append(f"🌊 **น้ำที่อินทร์บุรีตอนนี้ {w['wl']:.2f} เมตร** — {_gap_words(gap)}")
-        lines += _trend_lines(w)
-        if w.get("rate_per_day_3d") is not None and w["rate_per_day_3d"] > 0.02:
-            lines.append(f"   ↳ 3 วันที่ผ่านมาน้ำขึ้นเฉลี่ยวันละ {w['rate_per_day_3d']:.2f} เมตร")
+        lines.append(_station_line("🌊", "น้ำอินทร์บุรี", w))
         ly = w.get("last_year")
         if ly:
-            lines += _vs_last_year(w.get("wl"), ly, hot)
+            lines.append(_last_year_line(w["wl"], ly, hot))
     else:
-        lines.append("🌊 **น้ำที่อินทร์บุรี:** วันนี้ดึงค่าล่าสุดไม่ได้ ขอให้เช็กประกาศทางการ")
+        lines.append("🌊 น้ำอินทร์บุรี: วันนี้ดึงค่าล่าสุดไม่ได้ ขอให้เช็กประกาศทางการ")
 
-    # ── เขื่อนเจ้าพระยา ──
     if w.get("discharge") is not None:
-        d = f"🛑 **เขื่อนเจ้าพระยาระบายน้ำ {w['discharge']:,.0f} ลบ.ม./วินาที**"
+        d = f"🛑 เขื่อนเจ้าพระยาระบายน้ำ {w['discharge']:,.0f} ลบ.ม./วินาที"
         dj = w.get("discharge_change_24h")
         if dj is not None:
-            d += " (เท่ากับเมื่อวาน)" if abs(dj) < 0.5 else f" (เมื่อวาน{'เพิ่มขึ้น' if dj > 0 else 'ลดลง'} {abs(dj):,.0f})"
+            d += " เท่าเมื่อวาน" if abs(dj) < 0.5 else f" ({'เพิ่ม' if dj > 0 else 'ลด'}จากเมื่อวาน {abs(dj):,.0f})"
         lines.append(d)
 
-    # ── โพนางดำ ──
     pn, pl = w.get("phonangdam_now"), w.get("phonangdam_last_year")
     if pn:
-        lines.append(f"🏞️ **น้ำที่โพนางดำตอนนี้ {pn['wl']:.2f} เมตร** — {_gap_words(pn['gap_to_bank'])}")
-        lines += _trend_lines(pn)
+        s = _station_line("🏞️", "โพนางดำ", pn)
         vl = pn.get("vs_last_year")
         if vl:
-            lines += _vs_last_year(pn["wl"], vl, hot)
+            s += f" (ปีที่แล้ววันเดียวกัน {_m(vl['wl'])} เมตร)"
+        lines.append(s)
     elif pl:
-        lines.append("🏞️ **โพนางดำ:** วันนี้ยังดึงค่าล่าสุดไม่ได้ ขอเทียบกับปีที่แล้วไปก่อน")
-        lines.append(f"   ↳ ปีที่แล้ว ({pl['date']}) น้ำอยู่ที่ {_m(pl['wl'])} เมตร ({_gap_words(pl['gap_to_bank'])})")
+        lines.append(f"🏞️ โพนางดำ: วันนี้ยังไม่มีค่าล่าสุด (ปีที่แล้วช่วงนี้ {_m(pl['wl'])} เมตร)")
 
-    # ── อากาศ / ฝุ่น / ฝน ──
-    lines.append("")
-    w8 = facts.get("weather") or {}
-    pm = facts.get("pm25") or {}
+    w8, pm, rs = facts.get("weather") or {}, facts.get("pm25") or {}, facts.get("rain_storm") or {}
     seg = []
     if w8.get("temp_c") is not None:
-        seg.append(f"อุณหภูมิ {w8['temp_c']} องศา")
-    if w8.get("humidity_pct") is not None:
-        seg.append(f"ความชื้น {w8['humidity_pct']}%")
+        seg.append(f"{w8['temp_c']} องศา")
     if pm.get("value") is not None:
-        seg.append(f"ฝุ่น PM2.5 {pm['value']} ไมโครกรัม/ลบ.ม. (ระดับ{pm.get('level','-')})")
+        seg.append(f"ฝุ่น PM2.5 ระดับ{pm.get('level', '-')} ({pm['value']})")
+    if rs.get("max_rain_prob_24h_pct") is not None:
+        seg.append(f"โอกาสฝนใน 24 ชม. {rs['max_rain_prob_24h_pct']:.0f}%")
     if seg:
-        lines.append("🌡️ **อากาศตอนนี้:** " + " · ".join(seg))
+        lines.append("🌡️ " + " · ".join(seg))
     hs = facts.get("hotspots") or {}
     if isinstance(hs.get("count"), int) and hs["count"] > 0:
-        lines.append(f"🔥 **ควันจากการเผา:** ตรวจพบจุดความร้อน {hs['count']} จุดในพื้นที่เฝ้าระวัง")
-    rs = facts.get("rain_storm") or {}
-    seg = []
-    if rs.get("max_rain_prob_24h_pct") is not None:
-        seg.append(f"โอกาสฝนสูงสุดใน 24 ชั่วโมงข้างหน้า {rs['max_rain_prob_24h_pct']:.0f}%")
-    if rs.get("summary"):
-        seg.append(str(rs["summary"]))
-    if seg:
-        lines.append("🌧️ **ฝนและพายุ:** " + " · ".join(seg))
+        lines.append(f"🔥 ควันจากการเผา: ตรวจพบจุดความร้อน {hs['count']} จุด")
 
-    # ── สรุป ──
     lvl = analysis["level"]
     if lvl == "overbank" and gap is not None and gap > 0:
-        label = f"เฝ้าระวังสูงสุด (น้ำใกล้ตลิ่งมาก เหลืออีกประมาณ {gap*100:.0f} เซนติเมตร แต่ยังไม่ล้น)"
+        label = "เฝ้าระวังสูงสุด ยังไม่ล้นแต่เหลืออีกนิดเดียว"
     elif lvl == "overbank":
         label = "น้ำล้นตลิ่งแล้ว"
     else:
         label = analysis["level_label"]
-    lines.append("")
-    tip = ("ตอนนี้ควรเช็กระดับน้ำทุกวัน เตรียมของจำเป็นให้พร้อมย้าย และติดตามประกาศจากกรมชลประทาน/ปภ. อย่าเพิ่งวางใจ"
-           if hot else "ยังปกติ แต่ให้ติดตามระดับน้ำต่อเนื่อง")
-    lines.append(f"📌 **สรุป:** ระดับความเสี่ยงตอนนี้ = {label} {tip}")
+    tip = ("เช็กระดับน้ำทุกวัน เตรียมของจำเป็นให้พร้อมย้าย และติดตามประกาศกรมชลประทาน/ปภ."
+           if hot else "ยังปกติ ติดตามระดับน้ำต่อเนื่อง")
+    lines += ["", f"📌 {label} — {tip}"]
     return "\n".join(lines)
 
 
