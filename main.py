@@ -14,14 +14,64 @@ from google import genai
 from bs4 import BeautifulSoup
 from playwright.sync_api import sync_playwright
 
-from requests.packages.urllib3.exceptions import InsecureRequestWarning
-requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
+import urllib3
+urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY")
 MAKE_WEBHOOK_URL = os.environ.get("MAKE_WEBHOOK_URL")
 TMD_API_KEY = os.environ.get("TMD_API_KEY")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+# ─────────────────────────────────────────────
+# Gemini: เว้นระยะระหว่าง call + retry แบบ exponential backoff + jitter
+# (ครอบ client เดิม ฟังก์ชันใน ai_brain ที่เรียก client.models.generate_content ได้ผลทันที)
+# ─────────────────────────────────────────────
+GEMINI_MIN_GAP = float(os.environ.get("GEMINI_MIN_GAP_SEC", "8"))    # เว้นอย่างน้อยกี่วินาทีระหว่าง call
+GEMINI_MAX_TRY = int(os.environ.get("GEMINI_MAX_TRY", "5"))
+
+class _ModelsProxy:
+    def __init__(self, models):
+        self._m = models
+        self._last = 0.0
+
+    def __getattr__(self, name):
+        return getattr(self._m, name)
+
+    def generate_content(self, *args, **kwargs):
+        for i in range(GEMINI_MAX_TRY):
+            gap = time.time() - self._last
+            if gap < GEMINI_MIN_GAP:
+                time.sleep(GEMINI_MIN_GAP - gap)
+            try:
+                self._last = time.time()
+                res = self._m.generate_content(*args, **kwargs)
+                self._last = time.time()
+                return res
+            except Exception as e:
+                msg = str(e)
+                code = getattr(e, "code", None)
+                transient = (code in (429, 500, 503, 504)
+                             or "RESOURCE_EXHAUSTED" in msg or "UNAVAILABLE" in msg)
+                if "PerDay" in msg or "per day" in msg.lower():   # โควตารายวันหมด รอไปก็ไม่หาย
+                    print("❌ Gemini โควตารายวันหมด ไม่ retry")
+                    raise
+                if not transient or i == GEMINI_MAX_TRY - 1:
+                    raise
+                wait = min(2 ** (i + 2) + random.uniform(0, 1.5), 60)       # 4,8,16,32,60 + jitter
+                m = re.search(r"retry\w*\D{0,12}(\d+(?:\.\d+)?)\s*s", msg, re.I)  # เซิร์ฟเวอร์บอกให้รอกี่วิ
+                if m:
+                    wait = max(wait, min(float(m.group(1)) + 1, 90))
+                print(f"⚠️ Gemini {code or 'transient'} → รอ {wait:.0f}s แล้วลองใหม่ ({i+1}/{GEMINI_MAX_TRY})")
+                time.sleep(wait)
+
+class _ClientProxy:
+    def __init__(self, c):
+        self._c = c
+        self.models = _ModelsProxy(c.models)
+
+    def __getattr__(self, name):
+        return getattr(self._c, name)
+
+client = _ClientProxy(genai.Client(api_key=GEMINI_API_KEY))
 
 tz = pytz.timezone('Asia/Bangkok')
 now = datetime.now(tz)
@@ -42,19 +92,69 @@ INBURI_LON = 100.3253
 # ─────────────────────────────────────────────
 STATE_FILE = "state.json"
 
+# cache ข้ามรอบ เก็บใน state.json  {key: {"data":..., "ts": epoch}}
+_CACHE = {}
+CACHE_MAX_AGE = {                      # อายุสูงสุดที่ยอมใช้ข้อมูลเก่า (วินาที)
+    "tmd_obs": 3 * 3600, "tmd_nwp": 2 * 3600, "tomorrow": 2 * 3600,
+    "weather_om": 3 * 3600, "wl": 3 * 3600, "dam_discharge": 6 * 3600,
+}
+_STALE = {}                            # key -> "HH:MM" ของข้อมูลที่ต้องใช้ cache เก่าในรอบนี้
+
+def cache_put(key, data):
+    _CACHE[key] = {"data": data, "ts": time.time()}
+
+def cache_get(key, max_age=None):
+    """คืน (data, 'HH:MM') ถ้ามี cache และอายุไม่เกินกำหนด ไม่งั้น (None, None)"""
+    e = _CACHE.get(key)
+    if not isinstance(e, dict) or "data" not in e:
+        return None, None
+    base = key.split(":")[0]
+    limit = max_age if max_age is not None else CACHE_MAX_AGE.get(base, 3 * 3600)
+    try:
+        ts = float(e.get("ts", 0))
+    except Exception:
+        return None, None
+    if time.time() - ts > limit:
+        return None, None
+    return e["data"], datetime.fromtimestamp(ts, tz).strftime("%H:%M")
+
+def mark_stale(key, hhmm):
+    _STALE[key] = hhmm
+
 def load_state() -> dict:
+    state = {}
     try:
         with open(STATE_FILE, 'r', encoding='utf-8') as f:
-            return json.load(f)
-    except Exception:
-        return {}
+            state = json.load(f)
+        if not isinstance(state, dict):
+            state = {}
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        print(f"⚠️ อ่าน state.json ไม่ได้ ({e}) เริ่มจากค่าว่าง")
+    _CACHE.clear()
+    c = state.get("cache")
+    if isinstance(c, dict):
+        _CACHE.update(c)
+    return state
 
 def save_state(state: dict):
+    """เขียนแบบ atomic: เขียนไฟล์ชั่วคราว → fsync → os.replace (job ถูก kill กลางคันก็ไม่ทำไฟล์เดิมพัง)"""
+    tmp = STATE_FILE + ".tmp"
     try:
-        with open(STATE_FILE, 'w', encoding='utf-8') as f:
-            json.dump(state, f, ensure_ascii=False, indent=2)
+        out = dict(state)
+        out["cache"] = dict(_CACHE)
+        with open(tmp, 'w', encoding='utf-8') as f:
+            json.dump(out, f, ensure_ascii=False, indent=2)
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, STATE_FILE)
     except Exception as e:
         print(f"⚠️ บันทึก state ไม่ได้: {e}")
+        try:
+            os.remove(tmp)
+        except OSError:
+            pass
 
 def build_compare_text(current, previous, unit: str, label: str) -> str:
     if previous is None or current is None:
@@ -87,8 +187,15 @@ def get_dist(lat1, lon1, lat2, lon2):
 # ─────────────────────────────────────────────
 # HTTP helper: retry + backoff (429/5xx/timeout) และแคช Tomorrow.io ต่อรอบรัน
 # ─────────────────────────────────────────────
+def _backoff_wait(i, retry_after=None):
+    w = min(2 ** i + random.uniform(0, 1.5), 30)        # 1-2.5s, 2-3.5s, 4-5.5s ...
+    if retry_after:
+        w = max(w, min(retry_after, 60))
+    return w
+
 def _http_get_json(url, timeout=20, retries=3, headers=None):
     for i in range(retries):
+        retry_after = None
         try:
             r = requests.get(url, timeout=timeout, headers=headers)
             if r.status_code == 200:
@@ -96,27 +203,107 @@ def _http_get_json(url, timeout=20, retries=3, headers=None):
             if r.status_code not in (429, 500, 502, 503, 504):
                 print(f"⚠️ HTTP {r.status_code}: {url.split('?')[0]}")
                 return None
+            try:
+                retry_after = float(r.headers.get("Retry-After", ""))
+            except ValueError:
+                pass
+            print(f"⚠️ HTTP {r.status_code} ({i+1}/{retries}): {url.split('?')[0]}")
         except Exception as e:
             print(f"⚠️ GET ล้มเหลว ({i+1}/{retries}) {url.split('?')[0]}: {e}")
-        time.sleep(3 * (i + 1))
+        if i < retries - 1:
+            time.sleep(_backoff_wait(i, retry_after))
+    return None
+
+def _http_get_raw(url, headers=None, timeout=15, retries=3):
+    """GET พร้อม retry (429/5xx/timeout) คืน Response ตัวสุดท้าย หรือ None ถ้าเชื่อมต่อไม่ได้เลย
+    401/403/404 ฯลฯ ไม่ retry (ลองซ้ำก็ไม่หาย) ให้ผู้เรียกจัดการเอง"""
+    res = None
+    for i in range(retries):
+        retry_after = None
+        try:
+            res = requests.get(url, headers=headers, timeout=timeout)
+            if res.status_code not in (429, 500, 502, 503, 504):
+                return res
+            try:
+                retry_after = float(res.headers.get("Retry-After", ""))
+            except ValueError:
+                pass
+            print(f"⚠️ HTTP {res.status_code} ({i+1}/{retries}): {url.split('?')[0]}")
+        except Exception as e:
+            print(f"⚠️ GET ล้มเหลว ({i+1}/{retries}) {url.split('?')[0]}: {e}")
+        if i < retries - 1:
+            time.sleep(_backoff_wait(i, retry_after))
+    return res
+
+def _as_list(x):
+    """API บางตัวคืน dict เดี่ยวเมื่อมีรายการเดียว / null เมื่อไม่มี → ทำให้เป็น list เสมอ"""
+    if x is None:
+        return []
+    return x if isinstance(x, list) else [x]
+
+def _http_get_text(url, timeout=20, retries=3):
+    for i in range(retries):
+        try:
+            r = requests.get(url, timeout=timeout)
+            if r.status_code == 200:
+                return r.text
+            print(f"⚠️ HTTP {r.status_code} ({i+1}/{retries}): {url.split('?')[0]}")
+        except Exception as e:
+            print(f"⚠️ GET ล้มเหลว ({i+1}/{retries}) {url.split('?')[0]}: {e}")
+        if i < retries - 1:
+            time.sleep(_backoff_wait(i))
     return None
 
 _TMR_CACHE = {}
 def _tomorrow_forecast():
-    """เรียก Tomorrow.io ครั้งเดียวต่อรอบรัน (ประหยัดโควตา) ใช้ร่วมกันทั้ง get_weather และ get_rain_storm_forecast"""
+    """เรียก Tomorrow.io ครั้งเดียวต่อรอบรัน ใช้ร่วมกันทั้ง get_weather และ get_rain_storm_forecast
+    เรียกไม่สำเร็จ → ใช้ cache ใน state.json (อายุ ≤ 2 ชม.) แล้วตัดชั่วโมงที่ผ่านไปแล้วทิ้ง"""
     key = os.environ.get("TOMORROW_API_KEY")
     if not key:
         return None
-    if "data" not in _TMR_CACHE:
-        _TMR_CACHE["data"] = _http_get_json(
-            f"https://api.tomorrow.io/v4/weather/forecast"
-            f"?location={INBURI_LAT},{INBURI_LON}&apikey={key}", timeout=15, retries=3)
-    return _TMR_CACHE["data"]
+    if "data" in _TMR_CACHE:
+        return _TMR_CACHE["data"]
+
+    data = _http_get_json(
+        f"https://api.tomorrow.io/v4/weather/forecast"
+        f"?location={INBURI_LAT},{INBURI_LON}&apikey={key}", timeout=15, retries=3)
+    slim = None
+    if data:
+        try:
+            tl = data.get('timelines', {})
+            slim = {'timelines': {'minutely': (tl.get('minutely') or [])[:30],
+                                  'hourly':   (tl.get('hourly') or [])[:24]}}
+            if not slim['timelines']['hourly']:
+                slim = None
+        except Exception:
+            slim = None
+    if slim:
+        cache_put("tomorrow", slim)
+        _TMR_CACHE["data"] = slim
+        return slim
+
+    cached, ts = cache_get("tomorrow")
+    if cached:
+        cutoff = datetime.now(timezone.utc) - timedelta(hours=1)
+        hourly = []
+        for h in cached['timelines']['hourly']:
+            try:
+                if datetime.fromisoformat(h['time'].replace('Z', '+00:00')) >= cutoff:
+                    hourly.append(h)
+            except Exception:
+                continue
+        if hourly:
+            mark_stale("tomorrow", ts)
+            print(f"♻️ Tomorrow.io ดึงสดไม่ได้ → ใช้ cache ณ {ts} น.")
+            _TMR_CACHE["data"] = {'timelines': {'minutely': [], 'hourly': hourly}}   # minutely หมดอายุเร็ว ทิ้ง
+            return _TMR_CACHE["data"]
+    _TMR_CACHE["data"] = None
+    return None
 
 # ─────────────────────────────────────────────
 # TMD ชุดที่ 1: ผลตรวจวัดและพยากรณ์อากาศ (Observation)
 # ─────────────────────────────────────────────
-def get_tmd_observation() -> dict:
+def _get_tmd_observation_live() -> dict:
     result = {'available': False}
     if not TMD_API_KEY:
         print("⚠️ TMD_API_KEY ไม่พบ")
@@ -127,8 +314,14 @@ def get_tmd_observation() -> dict:
             f"?APIkey={TMD_API_KEY}&station_type=ตรวจอากาศผิวพื้น"
         )
         headers = {'Accept': 'application/json'}
-        res = requests.get(url, headers=headers, timeout=15)
+        res = _http_get_raw(url, headers=headers, timeout=15, retries=3)
+        if res is None:
+            print("⚠️ TMD Obs: เชื่อมต่อไม่ได้")
+            return result
         print(f"TMD Observation HTTP: {res.status_code}")
+        if res.status_code in (401, 403):
+            print("⚠️ TMD Obs: token ไม่ถูกต้อง/หมดอายุ → ตรวจ/ต่ออายุ TMD_API_KEY")
+            return result
         if res.status_code != 200:
             return result
 
@@ -145,7 +338,7 @@ def get_tmd_observation() -> dict:
             print(f"⚠️ TMD Obs: JSON parse ไม่ได้ ({je})")
             return result
 
-        stations = data.get('Stations', {}).get('Station', [])
+        stations = [st for st in _as_list((data.get('Stations') or {}).get('Station')) if isinstance(st, dict)]
 
         def _parse_cands(max_dist_km):
             cands = []
@@ -204,10 +397,24 @@ def get_tmd_observation() -> dict:
     return result
 
 
+def get_tmd_observation() -> dict:
+    """ดึงสด → สำเร็จก็เก็บ cache | ล้มเหลว → ใช้ cache ≤ 3 ชม. พร้อม stale_ts"""
+    r = _get_tmd_observation_live()
+    if r.get('available'):
+        cache_put("tmd_obs", r)
+        return r
+    cached, ts = cache_get("tmd_obs")
+    if isinstance(cached, dict) and cached.get('available'):
+        mark_stale("tmd_obs", ts)
+        print(f"♻️ TMD Obs ดึงสดไม่ได้ → ใช้ cache ณ {ts} น.")
+        return {**cached, 'stale_ts': ts}
+    return r
+
+
 # ─────────────────────────────────────────────
 # TMD ชุดที่ 2: พยากรณ์จากกรมอุตุฯ (WeatherForecast)
 # ─────────────────────────────────────────────
-def get_tmd_nwp_forecast() -> dict:
+def _get_tmd_nwp_forecast_live() -> dict:
     result = {'available': False}
     if not TMD_API_KEY:
         return result
@@ -236,10 +443,16 @@ def get_tmd_nwp_forecast() -> dict:
             headers = {'Accept': 'application/json'}
             if "/nwpapi/" in ep_url:
                 headers['Authorization'] = f"Bearer {TMD_API_KEY}"
-            res = requests.get(ep_url, headers=headers, timeout=15)
+            res = _http_get_raw(ep_url, headers=headers, timeout=15, retries=2)
+            if res is None:
+                print("⚠️ TMD NWP: เชื่อมต่อ endpoint ไม่ได้")
+                continue
             ep_name = ("nwpapi-v1" if "/nwpapi/" in ep_url else
                        "WeatherForecast" if "WeatherForecast" in ep_url else "NowcastForecast")
             print(f"TMD NWP ({ep_name}) HTTP: {res.status_code}")
+            if res.status_code in (401, 403):
+                print(f"⚠️ TMD NWP ({ep_name}): token ไม่ถูกต้อง/หมดอายุ")
+                continue
             raw = res.text.strip()
             if not raw:
                 print(f"⚠️ TMD NWP ({ep_name}): body ว่างเปล่า")
@@ -260,13 +473,15 @@ def get_tmd_nwp_forecast() -> dict:
         return result
 
     try:
-        wf_list   = data.get('WeatherForecasts', [])
+        wf_list   = _as_list(data.get('WeatherForecasts'))
+        first     = wf_list[0] if wf_list and isinstance(wf_list[0], dict) else {}
         forecasts = (
-            (wf_list[0].get('forecasts', []) if isinstance(wf_list, list) and wf_list else [])
-            or data.get('forecasts', [])
-            or data.get('Forecasts', [])
-            or (wf_list if isinstance(wf_list, list) else [])
+            _as_list(first.get('forecasts'))
+            or _as_list(data.get('forecasts'))
+            or _as_list(data.get('Forecasts'))
+            or wf_list
         )
+        forecasts = [f for f in forecasts if isinstance(f, dict)]
 
         next_6h = forecasts[:6]
         if not next_6h:
@@ -277,13 +492,13 @@ def get_tmd_nwp_forecast() -> dict:
         for fc in next_6h:
             d = fc.get('data', fc)
             try: rain_vals.append(float(d.get('rain', 0) or 0))
-            except: pass
+            except Exception: pass
             try: thunder_vals.append(float(d.get('thunderstorm', 0) or 0))
-            except: pass
+            except Exception: pass
             try: wind_vals.append(float(d.get('ws', d.get('ws10m', 0)) or 0))
-            except: pass
+            except Exception: pass
             try: temp_vals.append(float(d.get('tc', 0) or 0))
-            except: pass
+            except Exception: pass
 
         max_rain    = max(rain_vals,    default=0)
         max_thunder = max(thunder_vals, default=0)
@@ -311,6 +526,19 @@ def get_tmd_nwp_forecast() -> dict:
     except Exception as e:
         print(f"⚠️ TMD NWP parse error: {e}")
     return result
+
+
+def get_tmd_nwp_forecast() -> dict:
+    r = _get_tmd_nwp_forecast_live()
+    if r.get('available'):
+        cache_put("tmd_nwp", r)
+        return r
+    cached, ts = cache_get("tmd_nwp")
+    if isinstance(cached, dict) and cached.get('available'):
+        mark_stale("tmd_nwp", ts)
+        print(f"♻️ TMD NWP ดึงสดไม่ได้ → ใช้ cache ณ {ts} น.")
+        return {**cached, 'stale_ts': ts}
+    return r
 
 
 # ─────────────────────────────────────────────
@@ -444,12 +672,15 @@ def get_comprehensive_rain_info() -> dict:
         actual_text = (
             f"🌧️ สถานีอุตุฯ {tmd_obs['station_name']} "
             f"(ห่าง {tmd_obs['dist_km']} กม.): ฝน 3 ชม. = {tmd_rain_3h:.1f} มม."
+            + (f" (ข้อมูล ณ {tmd_obs['stale_ts']} น.)" if tmd_obs.get('stale_ts') else "")
         )
     elif rain_1h >= 2:
         actual_text = f"🌧️ มีฝนตกในชั่วโมงที่ผ่านมา {rain_1h:.1f} มม."
 
     # ── NWP กรมอุตุฯ ─────────────────────────
     nwp_text = tmd_nwp.get('description', '') if tmd_nwp.get('available') else ''
+    if nwp_text and tmd_nwp.get('stale_ts'):
+        nwp_text += f" (ข้อมูล ณ {tmd_nwp['stale_ts']} น.)"
 
     # ── Tomorrow.io ──────────────────────────
     now_text      = tmr.get('now_summary', '') if tmr else ''
@@ -469,6 +700,9 @@ def get_comprehensive_rain_info() -> dict:
             s = tmr['watch_slots'][0]
             times = ", ".join(x['time'] for x in tmr['watch_slots'][:3])
             tmr_slot_text = f"👀 Tomorrow.io: เฝ้าระวังช่วง {times} น. โอกาสฝน {s['rain_prob']:.0f}%"
+
+    if tmr_slot_text and _STALE.get("tomorrow"):
+        tmr_slot_text += f" (ข้อมูล ณ {_STALE['tomorrow']} น.)"
 
     # ── รวม ──────────────────────────────────
     parts = [p for p in [actual_text, nwp_text, now_text, tmr_slot_text] if p]
@@ -534,7 +768,7 @@ def get_hotspots():
 def _safe_float(v):
     try:
         return float(str(v).replace(',', '').strip())
-    except:
+    except Exception:
         return None
 
 def _parse_air4thai_age_seconds(st):
@@ -552,14 +786,14 @@ def _parse_air4thai_age_seconds(st):
             try:
                 dt = datetime.strptime(raw, fmt)
                 break
-            except:
+            except Exception:
                 pass
         if dt is None:
             return None
         if dt.tzinfo is None:
             dt = tz.localize(dt)
         return max(0, int((datetime.now(tz) - dt).total_seconds()))
-    except:
+    except Exception:
         return None
 
 def _weighted_pm25(rows):
@@ -831,12 +1065,13 @@ def get_weather():
         try:
             tmr_res = _tomorrow_forecast()
             if tmr_res:
-                current_data = tmr_res['timelines']['minutely'][0]['values']
+                tl = tmr_res['timelines']
+                current_data = (tl.get('minutely') or tl['hourly'])[0]['values']
                 humidity     = round(current_data['humidity'], 1)
                 wind         = round(current_data['windSpeed'], 1)
                 rain_prob    = max(h['values']['precipitationProbability']
                                    for h in tmr_res['timelines']['hourly'][:12])
-        except: pass
+        except Exception: pass
     try:
         res  = _http_get_json(
             f"https://api.open-meteo.com/v1/forecast"
@@ -845,21 +1080,121 @@ def get_weather():
             timeout=15, retries=3)
         temp = res['current']['temperature_2m']
         uv   = res['current'].get('uv_index', 'N/A')
-    except: pass
+        cache_put("weather_om", {"temp": temp, "uv": uv})
+    except Exception:
+        cached, ts = cache_get("weather_om")
+        if isinstance(cached, dict):
+            temp, uv = cached.get("temp", "N/A"), cached.get("uv", "N/A")
+            mark_stale("weather_om", ts)
+            print(f"♻️ Open-Meteo ดึงสดไม่ได้ → ใช้ cache ณ {ts} น.")
     return temp, pm25, rain_prob, humidity, wind, uv
 
-def get_water_stations(names=("อินทร์บุรี", "โพนางดำ")):
-    """ดึงระดับน้ำหลายสถานีจากหน้าเดียวกัน คืน {ชื่อสถานี: ระดับน้ำ หรือ None}"""
+WATER_API_URL = os.environ.get("THAIWATER_WL_API_URL")   # (ไม่บังคับ) endpoint JSON ที่หา เจอจาก log "🔌 XHR"
+
+def _fetch_water_api(names):
+    """ยิง API JSON ตรง (เร็ว/ไม่พังเวลาหน้าเว็บเปลี่ยน DOM) → {ชื่อ: ระดับน้ำ หรือ None}
+    ใช้เมื่อกำหนด THAIWATER_WL_API_URL เท่านั้น parser เป็นแบบ generic: หา dict ที่มีชื่อสถานี + ฟิลด์ระดับน้ำ"""
+    found = {n: None for n in names}
+    if not WATER_API_URL:
+        return found
+    data = _http_get_json(WATER_API_URL, timeout=20, retries=3)
+    if not data:
+        return found
+    fields = ("waterlevel_msl", "water_level", "waterlevel", "wl", "level")
+
+    def strings(o, depth=2):
+        if isinstance(o, str):
+            yield o
+        elif isinstance(o, dict) and depth > 0:
+            for v in o.values():
+                yield from strings(v, depth - 1)
+
+    hits = {n: [] for n in names}
+    def walk(o):
+        if isinstance(o, dict):
+            val = None
+            for f in fields:
+                try:
+                    v = float(str(o.get(f)).replace(",", ""))
+                    if 0 < v < 100:
+                        val = v
+                        break
+                except (TypeError, ValueError):
+                    continue
+            if val is not None:
+                texts = list(strings(o))
+                for n in names:
+                    if any(n in t for t in texts):
+                        hits[n].append((("สิงห์บุรี" in " ".join(texts)), val))
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+    walk(data)
+    for n in names:
+        if hits[n]:
+            hits[n].sort(key=lambda x: not x[0])      # เอาที่ระบุจังหวัดสิงห์บุรีก่อน
+            found[n] = hits[n][0][1]
+    print(f"🔌 Water API: {found}")
+    return found
+
+WL_MIN, WL_MAX = -5.0, 30.0     # ช่วงที่เป็นไปได้ของระดับน้ำ (ม.) ใช้ดักเลขผิดคอลัมน์
+
+def _to_num(txt):
+    c = re.sub(r"[^0-9.\-]", "", re.sub(r"[ ,]", "", txt or ""))
+    if not c or c in ("-", ".", "-."):
+        return None
+    try:
+        return float(c)
+    except ValueError:
+        return None
+
+def _pick_level(heads, cells):
+    """เลือกค่าระดับน้ำจากแถว: ใช้หัวคอลัมน์ที่มีคำว่า 'ระดับน้ำ' (ไม่ใช่ 'ตลิ่ง') ถ้าหาไม่เจอ
+    ค่อยเดาคอลัมน์ตัวเลขแรก (พิมพ์เตือน) และทุกกรณีต้องอยู่ในช่วงที่เป็นไปได้ ไม่งั้นคืน None"""
+    pos = None
+    idx = next((i for i, h in enumerate(heads) if "ระดับน้ำ" in h and "ตลิ่ง" not in h), None)
+    if idx is not None:
+        pos = idx - (len(heads) - len(cells))        # หัวตารางรวมคอลัมน์ชื่อสถานี (th) ที่ไม่อยู่ใน cells
+        if not (0 <= pos < len(cells)):
+            pos = None
+    if pos is not None:
+        v = _to_num(cells[pos])
+    else:
+        print(f"⚠️ ไม่พบหัวคอลัมน์ 'ระดับน้ำ' ({heads}) → เดาคอลัมน์ตัวเลขแรก")
+        v = next((n for n in (_to_num(c) for c in cells) if n is not None), None)
+    if v is not None and not (WL_MIN <= v <= WL_MAX):
+        print(f"⚠️ ระดับน้ำ {v} อยู่นอกช่วงที่เป็นไปได้ ({WL_MIN}..{WL_MAX}) → ทิ้ง")
+        return None
+    return v
+
+def _scrape_water_once(names):
+    """Playwright 1 รอบ (บล็อกรูป/ฟอนต์ให้โหลดเร็ว) + พิมพ์ URL ของ XHR JSON ลง log เพื่อหา API ตรง"""
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
     found = {n: None for n in names}
-    seen = []
+    seen, xhr = [], []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page    = browser.new_page()
         try:
-            page.goto(url, timeout=60000)
+            page.route("**/*", lambda route: route.abort()
+                       if route.request.resource_type in ("image", "font", "media")
+                       else route.continue_())
+
+            def _on_resp(resp):
+                try:
+                    if ("json" in resp.headers.get("content-type", "")
+                            and resp.request.resource_type in ("xhr", "fetch")):
+                        xhr.append(resp.url.split("?")[0])
+                except Exception:
+                    pass
+            page.on("response", _on_resp)
+
+            page.goto(url, timeout=60000, wait_until="domcontentloaded")
             page.wait_for_selector("th[scope='row']", timeout=30000)
             soup = BeautifulSoup(page.content(), "html.parser")
+            heads = [h.get_text(strip=True) for h in soup.select("thead th")]
             for th in soup.select("th[scope='row']"):
                 label = th.get_text(strip=True)
                 seen.append(label)
@@ -867,24 +1202,44 @@ def get_water_stations(names=("อินทร์บุรี", "โพนาง
                     if found[n] is not None or n not in label:
                         continue
                     cols = th.find_parent("tr").find_all("td")
-                    nums = []
-                    for td in cols:
-                        try:
-                            c = re.sub(r"[^0-9.\-]", "",
-                                       re.sub(r"[ ,]", "", td.get_text(strip=True)))
-                            if c and c != "-": nums.append(float(c))
-                        except: continue
-                    if nums:
-                        found[n] = nums[0]
-                    heads = [h.get_text(strip=True) for h in soup.select("thead th")]
+                    found[n] = _pick_level(heads, [td.get_text(strip=True) for td in cols])
                     print(f"🔍 แถว '{label}' ดิบจากเว็บ: {[td.get_text(strip=True) for td in cols]} | หัวตาราง: {heads}")
         except Exception as e:
             print(f"เกิดข้อผิดพลาดในการดึงข้อมูลสิงห์บุรี: {e}")
         finally:
             browser.close()
+    if xhr:
+        print(f"🔌 XHR JSON ที่หน้าเว็บเรียก (ลองตั้ง THAIWATER_WL_API_URL ด้วยตัวที่คืนระดับน้ำ): {sorted(set(xhr))[:15]}")
     print(f"📋 สถานีที่เห็นบนหน้าเว็บ ({len(seen)}): {seen[:40]}")
+    return found
+
+def get_water_stations(names=("อินทร์บุรี", "โพนางดำ")):
+    """ระดับน้ำหลายสถานี → {ชื่อสถานี: ระดับน้ำ หรือ None}
+    ลำดับ: API ตรง (ถ้าตั้งไว้) → Playwright (2 ครั้ง) → cache ≤ 3 ชม. (ติดป้าย stale)"""
+    found = _fetch_water_api(names)
+    for attempt in range(2):
+        missing = tuple(n for n in names if found[n] is None)
+        if not missing:
+            break
+        if attempt:
+            time.sleep(3 + random.uniform(0, 2))
+        got = _scrape_water_once(missing)
+        for n, v in got.items():
+            if v is not None:
+                found[n] = v
+
+    for n in names:
+        if found[n] is not None:
+            cache_put(f"wl:{n}", found[n])
+            continue
+        cached, ts = cache_get(f"wl:{n}")
+        if cached is not None:
+            found[n] = cached
+            mark_stale(f"wl:{n}", ts)
+            print(f"♻️ ระดับน้ำ {n} ดึงสดไม่ได้ → ใช้ cache ณ {ts} น.")
     for n, v in found.items():
-        print(f"   {'✅' if v is not None else '❌ ไม่พบ'} {n}: {v}")
+        tag = f" (cache ณ {_STALE[f'wl:{n}']} น.)" if f"wl:{n}" in _STALE else ""
+        print(f"   {'✅' if v is not None else '❌ ไม่พบ'} {n}: {v}{tag}")
     return found
 
 def get_inburi_data():
@@ -932,16 +1287,22 @@ def get_phonangdam_from_hii():
 
 def fetch_chao_phraya_dam_discharge():
     try:
-        res = requests.get(
+        text = _http_get_text(
             f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php"
-            f"?cb={random.randint(10000, 99999)}",
-            timeout=20)
-        match = re.search(r'var json_data = (\[.*\]);', res.text)
+            f"?cb={random.randint(10000, 99999)}", timeout=20, retries=3)
+        match = re.search(r'var json_data = (\[.*\]);', text or "")
         if match:
             val = json.loads(match.group(1))[0]['itc_water']['C13']['storage']
-            return float(val) if isinstance(val, (int, float)) else float(str(val).replace(',', ''))
+            val = float(val) if isinstance(val, (int, float)) else float(str(val).replace(',', ''))
+            cache_put("dam_discharge", val)
+            return val
     except Exception as e:
         print(f"⚠️ เขื่อน error: {e}")
+    cached, ts = cache_get("dam_discharge")
+    if cached is not None:
+        mark_stale("dam_discharge", ts)
+        print(f"♻️ เขื่อนเจ้าพระยา ดึงสดไม่ได้ → ใช้ cache ณ {ts} น.")
+        return float(cached)
     return None
 
 # ─────────────────────────────────────────────
@@ -961,7 +1322,8 @@ def save_current_water_data(wl, discharge, pho_wl=None):
             wl_val = wl if wl is not None else "-"
             dis_val = discharge if discharge is not None else "-"
             
-            writer.writerow([date_str_csv, time_str_csv, "อินทร์บุรี", wl_val, dis_val])
+            if wl is not None or discharge is not None:      # ไม่มีทั้งคู่ = ไม่เขียนแถว "-,-"
+                writer.writerow([date_str_csv, time_str_csv, "อินทร์บุรี", wl_val, dis_val])
             if pho_wl is not None:
                 writer.writerow([date_str_csv, time_str_csv, "โพนางดำ", pho_wl, "-"])
     except Exception as e:
@@ -1019,12 +1381,12 @@ def get_historical_water_data(target_date):
                         try:
                             dt = datetime.strptime(rd, fmt)
                             break
-                        except: pass
+                        except Exception: pass
                     if not dt:
                         try: dt = datetime.strptime(rd.split()[0], '%Y-%m-%d')
-                        except:
+                        except Exception:
                             try: dt = datetime.strptime(rd.split()[0], '%d/%m/%Y')
-                            except: pass
+                            except Exception: pass
                             
                 if dt and dt.year == target_last_year.year:
                     wl_val = str(row[wl_col_idx]).split('/')[0].strip()
@@ -1048,7 +1410,7 @@ def get_historical_water_data(target_date):
                             b_status = f"ล้นตลิ่ง {abs(diff_bank):.2f} ม."
                         else:
                             b_status = "พอดีระดับตลิ่ง"
-                    except:
+                    except Exception:
                         b_status = "-"
 
                     station_data_pool[station_name].append({
@@ -1072,9 +1434,9 @@ def get_historical_water_data(target_date):
                     if not d_str or s_name not in station_data_pool: continue
                     
                     try: dt = datetime.strptime(f"{d_str} {t_str}", "%Y-%m-%d %H:%M")
-                    except:
+                    except Exception:
                         try: dt = datetime.strptime(d_str, "%Y-%m-%d")
-                        except: continue
+                        except Exception: continue
                         
                     if dt.year == target_last_year.year:
                         date_diff = abs((target_last_year.date() - dt.date()).days)
@@ -1092,14 +1454,14 @@ def get_historical_water_data(target_date):
                                 b_status = f"ล้นตลิ่ง {abs(diff_bank):.2f} ม."
                             else:
                                 b_status = "พอดีระดับตลิ่ง"
-                        except:
+                        except Exception:
                             b_status = "-"
                             
                         station_data_pool[s_name].append({
                             'date_diff': date_diff, 'time_diff': time_diff_sec,
                             'dt': dt, 'wl': w_val, 'dis': d_val, 'b_status': b_status
                         })
-        except: pass
+        except Exception: pass
 
     # --- ส่วนที่ 3: เลือกข้อมูลที่ดีที่สุด ---
     for st_name, data_list in station_data_pool.items():
@@ -1128,6 +1490,36 @@ def get_historical_water_data(target_date):
 # ─────────────────────────────────────────────
 import ai_brain
 
+FORCE_REVIEW = os.environ.get("FORCE_REVIEW", "0") == "1"          # 1 = ให้ AI ตรวจทุกรอบเหมือนเดิม
+POST_MAX_CHARS = int(os.environ.get("POST_MAX_CHARS", "2500"))     # ปรับตามขีดจำกัดของแพลตฟอร์ม
+
+def check_draft_rules(draft, facts, header, has_fire):
+    """ตรวจร่างโพสต์ด้วยกฎง่าย ๆ คืนรายการปัญหา (ว่าง = ผ่าน ไม่ต้องเรียก AI ตรวจ)"""
+    issues = []
+    d = (draft or "").strip()
+    if len(d) < 80:
+        issues.append("ข้อความสั้นผิดปกติ")
+    if len(d) > POST_MAX_CHARS:
+        issues.append(f"ยาวเกิน {POST_MAX_CHARS} ตัวอักษร")
+    if "สถานการณ์อินทร์บุรี" not in d:
+        issues.append("ไม่มีหัวโพสต์")
+    if re.search(r"(?<![A-Za-z0-9])(N/A|None|nan|null|undefined)(?![A-Za-z0-9])|\{[A-Za-z_]+\}", d):
+        issues.append("มีค่าหลุดจากระบบ (N/A/None/placeholder)")
+    if has_fire and not re.search(r"ไฟ|ความร้อน|hotspot", d, re.I):
+        issues.append("พบจุดความร้อนแต่ไม่ได้กล่าวถึง")
+    return issues
+
+def minimal_post(facts, header):
+    """โพสต์สำรองขั้นสุดท้าย (ไม่ใช้ AI) กรณี AI + template_post ล้มเหลวทั้งคู่"""
+    w, pm, rs, wt = facts.get("weather", {}), facts.get("pm25", {}), facts.get("rain_storm", {}), facts.get("water", {})
+    lines = [header,
+             f"🌡️ อุณหภูมิ {w.get('temp_c', 'N/A')} °C | ความชื้น {w.get('humidity_pct', 'N/A')}%",
+             f"🌫️ PM2.5 {pm.get('value', 'N/A')} µg/m³ ({pm.get('level', '-')})",
+             f"🌧️ {rs.get('summary', '-')}"]
+    if wt.get("risk_level"):
+        lines.append(f"🌊 ความเสี่ยงน้ำ: {wt['risk_level']}")
+    return "\n".join(lines)
+
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"                       # 1 = ไม่ส่ง webhook
 POST_TEMPLATE_ON_AI_FAIL = os.environ.get("POST_TEMPLATE_ON_AI_FAIL", "1") != "0"
 
@@ -1144,15 +1536,23 @@ if __name__ == "__main__":
     stations = get_water_stations()
     wl, bank_level = stations.get("อินทร์บุรี"), ai_brain.BANK_LEVEL["อินทร์บุรี"]
     pho_wl = stations.get("โพนางดำ")
-    if pho_wl is None:
-        pho_wl = get_phonangdam_from_hii()
+    if pho_wl is None or "wl:โพนางดำ" in _STALE:      # ค่าจาก cache → ลองแหล่งสำรอง HII สดก่อน
+        _hii = get_phonangdam_from_hii()
+        if _hii is not None:
+            pho_wl = _hii
+            cache_put("wl:โพนางดำ", _hii)
+            _STALE.pop("wl:โพนางดำ", None)
     discharge = fetch_chao_phraya_dam_discharge()
     hotspots = get_hotspots()
     rain_info = get_comprehensive_rain_info()
 
     # ── 2) ประวัติ/บริบทน้ำ (โหลดก่อนบันทึกค่าใหม่) ──
     series = ai_brain.load_series()
-    save_current_water_data(wl, discharge, pho_wl)
+    wl_live  = None if "wl:อินทร์บุรี" in _STALE else wl
+    pho_live = None if "wl:โพนางดำ" in _STALE else pho_wl
+    dis_live = None if "dam_discharge" in _STALE else discharge
+    if any(v is not None for v in (wl_live, pho_live, dis_live)):
+        save_current_water_data(wl_live, dis_live, pho_live)   # ไม่เขียนค่า cache ลงประวัติ เพราะไม่ใช่ค่า ณ เวลานี้
     water_ctx = ai_brain.build_water_context(now, wl, discharge, series, bank_level, pho_wl=pho_wl)
     if water_ctx.get("change_24h") is None and wl is not None and prev_wl is not None:
         water_ctx["change_since_last_run"] = round(float(wl) - float(prev_wl), 2)   # ไม่ใช่ "เมื่อวาน"
@@ -1160,8 +1560,8 @@ if __name__ == "__main__":
     print(f"🌊 ความเสี่ยงน้ำ: {risk['level']} | {risk['reasons']}")
 
     new_state = dict(state)
-    if wl is not None:        new_state["last_water_level"] = float(wl)
-    if discharge is not None: new_state["last_discharge"] = float(discharge)
+    if wl_live is not None:  new_state["last_water_level"] = float(wl_live)
+    if dis_live is not None: new_state["last_discharge"] = float(dis_live)
     save_state(new_state)
 
     # ── 3) รวมเป็น facts ก้อนเดียว ──
@@ -1188,28 +1588,56 @@ if __name__ == "__main__":
         "water": {**water_ctx, "risk_level": risk['level'], "risk_reasons": risk['reasons']},
     }
 
+    if _STALE:
+        labels = {"tmd_obs": "ฝนสถานีอุตุฯ", "tmd_nwp": "พยากรณ์ NWP กรมอุตุฯ", "tomorrow": "พยากรณ์ Tomorrow.io",
+                  "weather_om": "อุณหภูมิ/UV", "wl:อินทร์บุรี": "ระดับน้ำอินทร์บุรี",
+                  "wl:โพนางดำ": "ระดับน้ำโพนางดำ", "dam_discharge": "ปริมาณน้ำปล่อยเขื่อนเจ้าพระยา"}
+        facts["stale_data"] = {
+            "note": "ข้อมูลต่อไปนี้ดึงสดไม่ได้ จึงใช้ค่าล่าสุดที่บันทึกไว้ ต้องระบุ 'ข้อมูล ณ เวลา' กำกับ "
+                    "ห้ามเขียนเหมือนเป็นค่าปัจจุบัน",
+            "items": {labels.get(k, k): f"ข้อมูล ณ {t} น." for k, t in _STALE.items()}}
+        print(f"♻️ ใช้ข้อมูลจาก cache: {facts['stale_data']['items']}")
+
     facts = ai_brain.thai_dates(facts)   # วันที่ทั้งหมดเป็น วัน เดือน ปี(พ.ศ.) ก่อนส่งให้ AI/เทมเพลต
 
     header = f"**สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})"
     when_text = f"วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}"
 
     # ── 4) ค้นข่าวล่าสุด -> วิเคราะห์ -> เขียน -> ตรวจ ──
-    research_text, sources = ai_brain.research_latest(client, when_text, period, water_ctx, risk)
     prev_post = ai_brain.previous_post_brief(state)
-    analysis = ai_brain.analyze(client, facts, risk, research_text, prev_post)
-    print(f"🧠 analysis: level={analysis['level']} focus={analysis.get('focus')}")
+    try:
+        research_text, sources = ai_brain.research_latest(client, when_text, period, water_ctx, risk)
+    except Exception as e:
+        print(f"⚠️ ค้นข่าวไม่สำเร็จ ข้ามขั้นนี้: {e}")
+        research_text, sources = "", []
+    try:
+        analysis = ai_brain.analyze(client, facts, risk, research_text, prev_post)
+    except Exception as e:
+        print(f"⚠️ analyze ไม่สำเร็จ ใช้ระดับความเสี่ยงจากกฎแทน: {e}")
+        analysis = {"level": risk["level"], "focus": None}
+    print(f"🧠 analysis: level={analysis.get('level')} focus={analysis.get('focus')}")
 
     final_post = ""
     try:
         draft = ai_brain.write_post(client, facts, analysis, research_text, prev_post, header, has_fire)
-        final_post, leftover = ai_brain.review_and_fix(
-            client, draft, facts, analysis, research_text, prev_post, header, has_fire)
-        if leftover:
-            print(f"ℹ️ ข้อสังเกตที่เหลือ: {leftover}")
+        issues = check_draft_rules(draft, facts, header, has_fire)
+        if FORCE_REVIEW or issues:
+            print(f"🔎 ส่งให้ AI ตรวจ/แก้ ({'บังคับ' if FORCE_REVIEW else issues})")
+            final_post, leftover = ai_brain.review_and_fix(
+                client, draft, facts, analysis, research_text, prev_post, header, has_fire)
+            if leftover:
+                print(f"ℹ️ ข้อสังเกตที่เหลือ: {leftover}")
+        else:
+            print("✅ ร่างผ่านกฎตรวจ ไม่ต้องเรียก AI ตรวจ (ประหยัด 1 call)")
+            final_post = draft
     except Exception as e:
         print(f"❌ AI เขียนโพสต์ไม่สำเร็จ: {e}")
         if POST_TEMPLATE_ON_AI_FAIL:
-            final_post = ai_brain.template_post(facts, analysis, header)
+            try:
+                final_post = ai_brain.template_post(facts, analysis, header)
+            except Exception as te:
+                print(f"❌ template_post ล้มเหลว ใช้โพสต์สำรองขั้นต่ำ: {te}")
+                final_post = minimal_post(facts, header)
 
     if final_post:
         final_post = final_post.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
@@ -1219,10 +1647,13 @@ if __name__ == "__main__":
     if DRY_RUN:
         print("\n🧪 DRY_RUN: ไม่ส่ง webhook / ไม่บันทึกความจำโพสต์")
     elif MAKE_WEBHOOK_URL and final_post:
-        res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post}, timeout=30)
-        if res.status_code == 200:
-            print("\n✅ ส่ง Webhook สำเร็จ!")
-            new_state = ai_brain.remember_post(new_state, final_post, analysis, facts, f"{date_str} {time_str}")
-            save_state(new_state)
-        else:
-            print(f"\n❌ Webhook ล้มเหลว HTTP {res.status_code}")
+        try:
+            res = requests.post(MAKE_WEBHOOK_URL, json={"text_to_post": final_post}, timeout=30)
+            if res.status_code == 200:
+                print("\n✅ ส่ง Webhook สำเร็จ!")
+                new_state = ai_brain.remember_post(new_state, final_post, analysis, facts, f"{date_str} {time_str}")
+                save_state(new_state)
+            else:
+                print(f"\n❌ Webhook ล้มเหลว HTTP {res.status_code}")
+        except Exception as e:
+            print(f"\n❌ ส่ง Webhook ไม่สำเร็จ: {e}")
