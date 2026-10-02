@@ -1253,23 +1253,36 @@ if __name__ == "__main__":
     header = f"**สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})"
     when_text = f"วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}"
 
-    # ── 4) ค้นข่าวล่าสุด -> วิเคราะห์ -> เขียน -> ตรวจ ──
-    research_text, sources = ai_brain.research_latest(client, when_text, period, water_ctx, risk)
-    prev_post = ai_brain.previous_post_brief(state)
-    analysis = ai_brain.analyze(client, facts, risk, research_text, prev_post)
-    print(f"🧠 analysis: level={analysis['level']} focus={analysis.get('focus')}")
-
+    # ── 4) ค้นข่าวล่าสุด -> วิเคราะห์ -> เขียน -> ตรวจ (ทุกขั้นตอน AI อยู่ใน try เดียว: พังตรงไหนก็สลับเป็นเทมเพลต) ──
     final_post = ""
+    analysis = None
     try:
+        research_text, sources = ai_brain.research_latest(client, when_text, period, water_ctx, risk)
+        prev_post = ai_brain.previous_post_brief(state)
+
+        analysis = ai_brain.analyze(client, facts, risk, research_text, prev_post)
+        print(f"🧠 analysis: level={analysis['level']} focus={analysis.get('focus')}")
+
         draft = ai_brain.write_post(client, facts, analysis, research_text, prev_post, header, has_fire)
         final_post, leftover = ai_brain.review_and_fix(
             client, draft, facts, analysis, research_text, prev_post, header, has_fire)
         if leftover:
             print(f"ℹ️ ข้อสังเกตที่เหลือ: {leftover}")
     except Exception as e:
-        print(f"❌ AI เขียนโพสต์ไม่สำเร็จ: {e}")
+        error_msg = str(e)
+        if ("429" in error_msg or "RESOURCE_EXHAUSTED" in error_msg.upper()
+                or "Circuit Breaker" in error_msg or type(e).__name__ == "CircuitBreakerError"):
+            print("🚨 ตัดวงจร (Circuit Breaker) ทำงาน: โควตา API หมด -> สลับใช้ Template ทันที")
+        else:
+            print(f"❌ AI ล้มเหลวจากสาเหตุอื่น: {error_msg} -> สลับใช้ Template")
+        final_post = ""
         if POST_TEMPLATE_ON_AI_FAIL:
-            final_post = ai_brain.template_post(facts, analysis, header)
+            if analysis is None:   # พังก่อน analyze เสร็จ
+                analysis = {"level": risk["level"], "focus": "water"}
+            try:
+                final_post = ai_brain.template_post(facts, analysis, header)
+            except Exception as te:
+                print(f"❌ template_post ก็ล้มเหลว: {te}")
 
     if final_post:
         final_post = final_post.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
