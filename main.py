@@ -848,8 +848,8 @@ def get_weather():
     except: pass
     return temp, pm25, rain_prob, humidity, wind, uv
 
-def get_water_stations(names=("อินทร์บุรี", "โพนางดำ")):
-    """ดึงระดับน้ำหลายสถานีจากหน้าเดียวกัน คืน {ชื่อสถานี: ระดับน้ำ หรือ None}"""
+def _get_water_stations_web(names=("อินทร์บุรี", "โพนางดำ")):
+    """สำรอง: ดึงระดับน้ำจากหน้าเว็บสิงห์บุรี (Playwright) คืน {ชื่อสถานี: ระดับน้ำ หรือ None}"""
     url = f"https://singburi.thaiwater.net/wl?cb={random.randint(10000, 99999)}"
     found = {n: None for n in names}
     seen = []
@@ -885,6 +885,66 @@ def get_water_stations(names=("อินทร์บุรี", "โพนาง
     print(f"📋 สถานีที่เห็นบนหน้าเว็บ ({len(seen)}): {seen[:40]}")
     for n, v in found.items():
         print(f"   {'✅' if v is not None else '❌ ไม่พบ'} {n}: {v}")
+    return found
+
+def _first_number(*vals):
+    """คืนค่าตัวเลขตัวแรกที่แปลงเป็น float ได้ (รับ 0 ได้ ข้าม None/ค่าว่าง)"""
+    for v in vals:
+        if v is None or str(v).strip() in ("", "-"):
+            continue
+        try:
+            return float(str(v).replace(",", ""))
+        except ValueError:
+            continue
+    return None
+
+def get_water_stations(names=("อินทร์บุรี", "โพนางดำ")):
+    """ดึงระดับน้ำจาก API ของ ThaiWater v3 โดยตรง (เร็วกว่าและไม่ติด Timeout)
+    ถ้า waterlevel_m เป็น null จะใช้ waterlevel_msl แทน | ถ้า API พัง/ไม่เจอสถานี จะถอยไปใช้การดึงจากหน้าเว็บเดิม"""
+    url = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public/waterlevel"
+    headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
+    found = {n: None for n in names}
+
+    print("🔌 กำลังดึงข้อมูลระดับน้ำจาก ThaiWater API...")
+    try:
+        res = requests.get(url, headers=headers, timeout=15)
+        if res.status_code == 200:
+            payload = res.json()
+            water_data = payload.get("waterlevel_data", payload.get("data", [])) or []
+
+            for item in water_data:
+                station = item.get("station", {}) or {}
+                name_th = str(
+                    (station.get("tele_station_name", {}) or {}).get("th", "")
+                    or (station.get("station_name", {}) or {}).get("th", "")
+                    or item.get("station_name_th", "") or ""
+                )
+                for target in names:
+                    if found[target] is None and target in name_th:
+                        wl = _first_number(item.get("waterlevel_m"), item.get("waterlevel_msl"),
+                                           item.get("water_level"), item.get("wl_value"))
+                        if wl is not None:
+                            found[target] = wl
+                            print(f"✅ พบระดับน้ำ {target}: {wl} ม.")
+        else:
+            print(f"⚠️ ThaiWater API HTTP {res.status_code}")
+    except Exception as e:
+        print(f"⚠️ เกิดข้อผิดพลาด API ThaiWater: {e}")
+
+    # สำรอง: ถ้า API ไม่ได้ค่าของสถานีไหน ให้ลองหน้าเว็บเดิม
+    missing = tuple(n for n, v in found.items() if v is None)
+    if missing:
+        print(f"↩️ API ไม่พบ {list(missing)} → ลองดึงจากหน้าเว็บสำรอง")
+        try:
+            for n, v in _get_water_stations_web(missing).items():
+                if v is not None:
+                    found[n] = v
+        except Exception as e:
+            print(f"⚠️ ดึงจากหน้าเว็บสำรองไม่สำเร็จ: {e}")
+
+    for n, v in found.items():
+        if v is None:
+            print(f"❌ ไม่พบข้อมูลระดับน้ำล่าสุดของ {n}")
     return found
 
 def get_inburi_data():
