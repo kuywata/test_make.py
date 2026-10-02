@@ -56,5 +56,5 @@ jobs:
           git config --local user.email "action@github.com"
           git config --local user.name "GitHub Action"
           git add state.json history_water.csv || true
-          git commit -m "Auto-update state and history data" -a || true
+          git commit -m "Auto-update state and history data [skip ci]" -a || true
           git push origin HEAD || true
