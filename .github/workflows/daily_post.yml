@@ -2,9 +2,8 @@ name: Daily Inburi News
 
 on:
   workflow_dispatch: 
-  # ถ้าอนาคตอยากตั้งเวลาให้รันอัตโนมัติ ให้เอา # หน้า schedule ออก แล้วตั้งเวลาได้เลยครับ
-  # schedule:
-  #   - cron: '30 1,9 * * *' 
+  schedule:
+    - cron: '30 23,5,11 * * *' # 06:30, 12:30, 18:30 น. (เวลาไทย)
 
 permissions:
   contents: write # จำเป็นมาก เพื่อให้ระบบสามารถบันทึกไฟล์ CSV กลับเข้า GitHub ได้
