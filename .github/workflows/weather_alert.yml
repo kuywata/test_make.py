@@ -3,7 +3,11 @@ name: Hourly Weather Alert
 on:
   workflow_dispatch: 
   schedule:
-    - cron: '30 23,5,11 * * *' # 06:30, 12:30, 18:30 น. (เวลาไทย)
+    - cron: '15 * * * *' # เช็กทุกชั่วโมง นาทีที่ 15 จะได้ไม่ชนกับโพสต์หลัก
+
+concurrency:
+  group: repo-state
+  cancel-in-progress: false
 
 jobs:
   check_alert:
@@ -17,14 +21,20 @@ jobs:
         with:
           python-version: '3.10'
 
-      - name: Install Libraries
+      - name: Install Libraries & Playwright
         run: |
           python -m pip install --upgrade pip
-          pip install requests google-genai pytz
+          pip install requests google-genai pytz beautifulsoup4 playwright
+          playwright install chromium --with-deps
 
       - name: Run Alert Script
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GEMINI_API_KEYS: ${{ secrets.GEMINI_API_KEYS }}
           MAKE_WEBHOOK_URL: ${{ secrets.MAKE_WEBHOOK_URL }}
           TOMORROW_API_KEY: ${{ secrets.TOMORROW_API_KEY }}
+          TMD_API_KEY: ${{ secrets.TMD_API_KEY }}
+          EE_JSON_KEY: ${{ secrets.EE_JSON_KEY }}
+          WAQI_TOKEN: ${{ secrets.WAQI_TOKEN }}
+          OWM_API_KEY: ${{ secrets.OWM_API_KEY }}
         run: python alert.py
