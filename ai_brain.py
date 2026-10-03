@@ -724,20 +724,26 @@ def _station_line(icon, name, st, last_year=None):
 
 
 def _last_year_line(now_wl, ly, hot):
-    """ปีที่แล้ว: ระดับวันเดียวกัน + ส่วนต่าง + ปีที่แล้วหลังจากนั้นสูงสุดเท่าไหร่ (เลขไม่ซ้ำกับบรรทัดบน)"""
+    """ปีที่แล้ว: ระดับวันเดียวกัน + ส่วนต่าง + เทียบจุดพีคปีที่แล้วให้สมเหตุสมผล"""
     s = f"📅 ปีที่แล้ววันเดียวกันน้ำ {_m(ly['wl'])} เมตร"
     if ly.get("gap_to_bank", 1) < 0:
         s += " (ล้นตลิ่งแล้ว)"
+        
     diff = ly.get("this_year_minus_last_year")
     if diff is None and now_wl is not None:
         diff = round(now_wl - ly["wl"], 2)
     if diff is not None and abs(diff) >= 0.005:
         s += f" ปีนี้{'สูงกว่า' if diff > 0 else 'ต่ำกว่า'} {_cm(diff)}"
+        
     pk = ly.get("next_30d_peak")
-    if pk:
-        s += f" และหลังจากนั้นปีที่แล้วขึ้นไปสูงสุด {_m(pk['wl'])} เมตร ช่วง {_short_date(pk['date'])}"
-        if hot:
-            s += " จึงยังวางใจไม่ได้"
+    if pk and now_wl is not None:
+        pk_wl = pk['wl']
+        if now_wl >= pk_wl:
+            s += f" 🚨 และตอนนี้ระดับน้ำ **ทำลายสถิติสูงสุดของช่วงนี้เมื่อปีที่แล้ว** ({_m(pk_wl)} เมตร ช่วง {_short_date(pk['date'])}) ไปแล้ว สถานการณ์น่าเป็นห่วงอย่างยิ่ง!"
+        else:
+            s += f" และหลังจากนั้นปีที่แล้วขึ้นไปสูงสุด {_m(pk_wl)} เมตร ช่วง {_short_date(pk['date'])}"
+            if hot:
+                s += " จึงยังวางใจไม่ได้"
     return s
 
 
