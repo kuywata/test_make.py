@@ -2,6 +2,8 @@ name: Hourly Weather Alert
 
 on:
   workflow_dispatch: 
+  schedule:
+    - cron: '30 23,5,11 * * *' # 06:30, 12:30, 18:30 น. (เวลาไทย)
 
 jobs:
   check_alert:
