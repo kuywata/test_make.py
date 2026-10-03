@@ -857,8 +857,8 @@ def _get_water_stations_web(names=("อินทร์บุรี", "โพน�
         browser = p.chromium.launch(headless=True)
         page    = browser.new_page()
         try:
-            page.goto(url, timeout=60000)
-            page.wait_for_selector("th[scope='row']", timeout=30000)
+            page.goto(url, timeout=15000)
+            page.wait_for_selector("th[scope='row']", timeout=10000)
             soup = BeautifulSoup(page.content(), "html.parser")
             for th in soup.select("th[scope='row']"):
                 label = th.get_text(strip=True)
