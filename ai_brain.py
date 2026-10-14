@@ -668,10 +668,41 @@ def llm_review(client, post, facts, analysis):
 
 
 def strip_unverified_news(post, research_text):
+    """ด่านสุดท้ายกันข่าวมั่ว: ตัดบรรทัดใต้หัวข้อ 📰 ที่ไม่มีคำสำคัญปรากฏใน research_text ออก
+    (ไม่ไว้ใจ AI reviewer อย่างเดียว เพราะพบว่าโพสต์จริงเคยหลุดข่าวที่กุขึ้นออกไปทั้งที่ reviewer ทักแล้ว)"""
     if "📰" not in post:
         return post, []
-    cleaned = re.sub(r"\n*📰[^\n]*\n(?=\n|$)", "\n", post)
-    return cleaned, []
+    research_text = research_text or ""
+    lines = post.split("\n")
+    out, removed, in_news = [], [], False
+    section_markers = ("🌡️", "🌧️", "🌊", "🛑", "📌", "📰")
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("📰"):
+            in_news = True
+            out.append(line)
+            continue
+        if in_news and stripped.startswith(section_markers) and not stripped.startswith("📰"):
+            in_news = False
+        if in_news and stripped and stripped[0] in "*-•":
+            # ตัดเป็นท่อนย่อยด้วยเครื่องหมายวรรคตอน/คำเชื่อมทั่วไป เพื่อจับกรณี AI แอบเติมข้อความมั่ว
+            # ต่อท้ายในบรรทัดข่าวจริง (เจอเคสจริง: ท่อนแรกของประโยคเป็นข่าวจริง แต่มีท่อนที่แต่งเพิ่มต่อท้าย)
+            chunks = re.split(r"[,，。;：:]| และ| โดย| ซึ่ง| แต่| พร้อม", stripped)
+            words = [w for w in re.findall(r"[ก-๙A-Za-z0-9]{4,}", stripped)]
+            bad_chunks = 0
+            for ch in chunks:
+                cw = re.findall(r"[ก-๙A-Za-z0-9]{4,}", ch)
+                if len(cw) >= 2 and sum(1 for w in cw if w in research_text) / len(cw) < 0.25:
+                    bad_chunks += 1
+            verified = sum(1 for w in words if w in research_text)
+            if not words or verified / len(words) < 0.3 or bad_chunks >= 1:
+                removed.append(stripped)
+                continue
+        out.append(line)
+    cleaned = "\n".join(out)
+    # ถ้าตัดจนไม่เหลือบรรทัดข่าวเลย ให้เอาหัวข้อ 📰 ออกทั้งหมดด้วย
+    cleaned = re.sub(r"\n*📰[^\n]*\n(?=\n|$)", "\n", cleaned)
+    return cleaned, removed
 
 
 def _m(v):

@@ -116,52 +116,75 @@ def _tomorrow_forecast():
 # ─────────────────────────────────────────────
 # TMD ชุดที่ 1: ผลตรวจวัดและพยากรณ์อากาศ (Observation)
 # ─────────────────────────────────────────────
+_TMD_OBS_CACHE = None
+
 def get_tmd_observation() -> dict:
+    global _TMD_OBS_CACHE
+    if _TMD_OBS_CACHE is not None:
+        return _TMD_OBS_CACHE
+
     result = {'available': False}
-    if not TMD_API_KEY:
-        print("⚠️ TMD_API_KEY ไม่พบ")
-        return result
-    try:
-        url = (
+    urls = [
+        "https://data.tmd.go.th/api/Weather3Hours/V2/?uid=api&ukey=api12345&format=json",
+        "http://data.tmd.go.th/api/Weather3Hours/V2/?uid=api&ukey=api12345&format=json",
+    ]
+    if TMD_API_KEY:
+        urls.insert(0, (
             "https://data.tmd.go.th/api/Weather3Hours/v2/"
             f"?APIkey={TMD_API_KEY}&station_type=ตรวจอากาศผิวพื้น"
-        )
-        headers = {'Accept': 'application/json'}
-        res = requests.get(url, headers=headers, timeout=15)
-        print(f"TMD Observation HTTP: {res.status_code}")
-        if res.status_code != 200:
-            return result
+        ))
 
-        raw = res.text.strip()
-        if not raw:
-            print("⚠️ TMD Obs: response body ว่างเปล่า (ยังไม่มีข้อมูลในรอบนี้)")
-            return result
-        if raw.startswith('<'):
-            print("⚠️ TMD Obs: ได้ HTML กลับมาแทน JSON")
-            return result
+    data = None
+    for url in urls:
         try:
+            headers = {'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0'}
+            res = requests.get(url, headers=headers, timeout=15, verify=False)
+            print(f"TMD Observation HTTP ({url.split('?')[0]}): {res.status_code}")
+            if res.status_code != 200:
+                continue
+            raw = res.text.strip()
+            if not raw:
+                print("⚠️ TMD Obs: response body ว่างเปล่า → ลองลิงก์สำรองถัดไป")
+                continue
+            if raw.startswith('<'):
+                print("⚠️ TMD Obs: ได้ HTML กลับมาแทน JSON → ลองลิงก์สำรองถัดไป")
+                continue
             data = res.json()
+            if data:
+                break
         except Exception as je:
-            print(f"⚠️ TMD Obs: JSON parse ไม่ได้ ({je})")
-            return result
+            print(f"⚠️ TMD Obs request/parse error ({je})")
+            continue
 
-        stations = data.get('Stations', {}).get('Station', [])
+    if not data:
+        _TMD_OBS_CACHE = result
+        return result
+
+    try:
+        stations_node = data.get('Stations', {})
+        stations = stations_node.get('Station', []) if isinstance(stations_node, dict) else stations_node
+
+        def _val(obj):
+            if isinstance(obj, dict):
+                return obj.get('Value', obj.get('#text'))
+            return obj
 
         def _parse_cands(max_dist_km):
             cands = []
             for st in stations:
                 try:
-                    lat  = float(st.get('Latitude', 0))
-                    lon  = float(st.get('Longitude', 0))
+                    lat  = float(_val(st.get('Latitude')) or 0)
+                    lon  = float(_val(st.get('Longitude')) or 0)
                     dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
                     if dist > max_dist_km:
                         continue
-                    obs      = st.get('Observation', {})
-                    rain_raw = obs.get('Rainfall', {})
-                    rain     = float(rain_raw.get('Value') or 0) if isinstance(rain_raw, dict) else float(rain_raw or 0)
-                    temp     = float((obs.get('AirTemperature', {}) or {}).get('Value') or 0)
-                    hum      = float((obs.get('RelativeHumidity', {}) or {}).get('Value') or 0)
-                    wind     = float((obs.get('WindSpeed', {}) or {}).get('Value') or 0)
+                    obs  = st.get('Observation', {}) or {}
+                    rain = float(_val(obs.get('Rainfall')) or 0)
+                    temp = float(_val(obs.get('AirTemperature')) or 0)
+                    hum  = float(_val(obs.get('RelativeHumidity')) or 0)
+                    wind = float(_val(obs.get('WindSpeed')) or 0)
+                    if temp <= 5 or temp > 55:
+                        continue
                     cands.append({
                         'name': st.get('StationNameThai', st.get('StationNameEng', '?')),
                         'dist': dist, 'rain_3h': rain,
@@ -177,6 +200,7 @@ def get_tmd_observation() -> dict:
             print("⚠️ TMD Obs: ไม่พบสถานีใน 35 กม. ขยายเป็น 80 กม.")
         if not candidates:
             print("⚠️ TMD Obs: ไม่พบสถานีเลย")
+            _TMD_OBS_CACHE = result
             return result
 
         candidates.sort(key=lambda x: x['dist'])
@@ -198,9 +222,12 @@ def get_tmd_observation() -> dict:
             'station_name': best['name'],
             'dist_km': round(best['dist'], 1),
         })
-        print(f"✅ TMD Obs ({len(top3)} สถานี): {best['name']} {best['dist']:.1f}กม. ฝน={rain_report:.2f}มม.")
+        print(f"✅ TMD Obs ({len(top3)} สถานี): {best['name']} {best['dist']:.1f}กม. "
+              f"อุณหภูมิ={w_temp:.1f}°C ความชื้น={w_hum:.0f}% ฝน={rain_report:.2f}มม.")
     except Exception as e:
         print(f"⚠️ TMD Observation error: {e}")
+
+    _TMD_OBS_CACHE = result
     return result
 
 
@@ -318,6 +345,32 @@ def get_tmd_nwp_forecast() -> dict:
 # ─────────────────────────────────────────────
 def get_actual_rain_last_hour() -> dict:
     result = {'rain_1h': None, 'rain_3h': None}
+    # 1) ดึงค่าฝนวัดจริงจากสถานีโทรมาตร สสน. (ThaiWater) ในรัศมี 25 กม. รอบอินทร์บุรี
+    try:
+        tw_url = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public/rain_24h"
+        r_tw = requests.get(tw_url, headers={"User-Agent": "Mozilla/5.0"}, timeout=12, verify=False)
+        if r_tw.status_code == 200:
+            rows = r_tw.json().get("data", []) or []
+            best_st = None
+            for r in rows:
+                st = r.get("station", {}) or {}
+                lat = _safe_float(st.get("tele_station_lat"))
+                lon = _safe_float(st.get("tele_station_long"))
+                rain_val = _safe_float(r.get("rain_24h"))
+                if lat is None or lon is None or rain_val is None:
+                    continue
+                dist = get_dist(INBURI_LAT, INBURI_LON, lat, lon)
+                if dist <= 25:
+                    name = (st.get("tele_station_name", {}) or {}).get("th", "อินทร์บุรี")
+                    if best_st is None or dist < best_st["dist"]:
+                        best_st = {"name": name, "dist": round(dist, 1), "rain_24h": round(rain_val, 2)}
+            if best_st:
+                print(f"✅ สถานีวัดน้ำฝนจริง สสน. ({best_st['name']} ห่าง {best_st['dist']} กม.): ฝนสะสม = {best_st['rain_24h']} มม.")
+                result['rain_3h'] = best_st['rain_24h']
+    except Exception as e:
+        print(f"⚠️ ThaiWater actual rain error: {e}")
+
+    # 2) Open-Meteo backup (ลด timeout เหลือ 8 วินาที เพื่อไม่ให้รันค้าง)
     try:
         url = (
             f"https://api.open-meteo.com/v1/forecast"
@@ -325,7 +378,7 @@ def get_actual_rain_last_hour() -> dict:
             f"&hourly=precipitation&past_hours=3&forecast_hours=1"
             f"&timezone=Asia%2FBangkok"
         )
-        res    = _http_get_json(url, timeout=25, retries=3)
+        res = _http_get_json(url, timeout=8, retries=1)
         if not res:
             return result
         times  = res['hourly']['time']
@@ -339,7 +392,7 @@ def get_actual_rain_last_hour() -> dict:
 
         if current_idx >= 1:
             result['rain_1h'] = round(float(precip[current_idx - 1] or 0), 2)
-        if current_idx >= 3:
+        if current_idx >= 3 and result['rain_3h'] is None:
             result['rain_3h'] = round(
                 sum(float(p or 0) for p in precip[max(0, current_idx-3):current_idx]), 2
             )
@@ -821,26 +874,66 @@ def get_accurate_pm25(return_meta=False):
 
 def get_weather():
     TOMORROW_API_KEY = os.environ.get("TOMORROW_API_KEY")
+    OWM_API_KEY = os.environ.get("OWM_API_KEY")
     temp, pm25, rain_prob, humidity, wind, uv = "N/A", "N/A", "N/A", "N/A", "N/A", "N/A"
+
+    # 1) อันดับ 1: ดึงอุณหภูมิ ความชื้น และลม จากสถานีตรวจวัดจริงกรมอุตุนิยมวิทยา (TMD)
+    tmd_real = get_tmd_observation()
+    if tmd_real.get('available'):
+        temp = tmd_real['temp']
+        if tmd_real.get('humidity'):
+            humidity = tmd_real['humidity']
+        if tmd_real.get('wind_speed') is not None:
+            wind = tmd_real['wind_speed']
+
+    # 2) อันดับ 2: ดึงจากสถานีภาคพื้นดิน OpenWeatherMap (กรณีสถานีกรมอุตุฯ ยังไม่ส่งค่ารอบนี้)
+    if (temp == "N/A" or humidity == "N/A") and OWM_API_KEY:
+        try:
+            r = requests.get(
+                f"https://api.openweathermap.org/data/2.5/weather"
+                f"?lat={INBURI_LAT}&lon={INBURI_LON}&appid={OWM_API_KEY}&units=metric",
+                timeout=10)
+            if r.status_code == 200:
+                d = r.json()
+                if temp == "N/A" and d.get("main", {}).get("temp") is not None:
+                    temp = round(float(d["main"]["temp"]), 1)
+                    print(f"✅ อุณหภูมิวัดจริงจาก OWM Station: {temp} °C")
+                if humidity == "N/A" and d.get("main", {}).get("humidity") is not None:
+                    humidity = round(float(d["main"]["humidity"]), 1)
+                if wind == "N/A" and d.get("wind", {}).get("speed") is not None:
+                    wind = round(float(d["wind"]["speed"]), 1)
+        except Exception as e:
+            print(f"⚠️ OWM Weather error: {e}")
+
+    # 3) ดึงโอกาสเกิดฝนจาก Tomorrow.io (และใช้ความชื้น/ลมสำรองถ้า 2 แหล่งแรกไม่มี)
     if TOMORROW_API_KEY:
         try:
             tmr_res = _tomorrow_forecast()
             if tmr_res:
                 current_data = tmr_res['timelines']['minutely'][0]['values']
-                humidity     = round(current_data['humidity'], 1)
-                wind         = round(current_data['windSpeed'], 1)
-                rain_prob    = max(h['values']['precipitationProbability']
-                                   for h in tmr_res['timelines']['hourly'][:12])
-        except: pass
+                if humidity == "N/A":
+                    humidity = round(current_data['humidity'], 1)
+                if wind == "N/A":
+                    wind = round(current_data['windSpeed'], 1)
+                rain_prob = max(h['values']['precipitationProbability']
+                                for h in tmr_res['timelines']['hourly'][:12])
+        except Exception:
+            pass
+
+    # 4) ดึงค่า UV (และอุณหภูมิสำรองสุดท้าย) จาก Open-Meteo (timeout 8 วินาที ไม่รอนาน)
     try:
-        res  = _http_get_json(
+        res = _http_get_json(
             f"https://api.open-meteo.com/v1/forecast"
             f"?latitude={INBURI_LAT}&longitude={INBURI_LON}"
             f"&current=temperature_2m,uv_index&timezone=Asia%2FBangkok",
-            timeout=15, retries=3)
-        temp = res['current']['temperature_2m']
-        uv   = res['current'].get('uv_index', 'N/A')
-    except: pass
+            timeout=8, retries=1)
+        if res and 'current' in res:
+            if temp == "N/A":
+                temp = res['current']['temperature_2m']
+            uv = res['current'].get('uv_index', 'N/A')
+    except Exception:
+        pass
+
     return temp, pm25, rain_prob, humidity, wind, uv
 
 def _get_water_stations_web(names=("อินทร์บุรี", "โพนางดำ")):
@@ -1215,9 +1308,9 @@ def _emergency_fallback_post(facts: dict, header: str) -> str:
     pm = facts.get("pm25", {})
     rs = facts.get("rain_storm", {})
 
-    wl_val = w.get("current_wl")
+    wl_val = w.get("wl")
     bank_lvl = w.get("bank_level", 13.00)
-    dis_val = w.get("current_discharge")
+    dis_val = w.get("discharge")
 
     lines = [header, ""]
     if wl_val is not None:
