@@ -432,7 +432,6 @@ def get_comprehensive_rain_info() -> dict:
     if tmr:                                 sources_used.append('Tomorrow.io')
     if actual.get('rain_1h') is not None:   sources_used.append('Open-Meteo')
 
-    # ── ฝนจริงที่ตกแล้ว ──────────────────────
     rain_1h     = actual.get('rain_1h', 0) or 0
     rain_3h     = actual.get('rain_3h', 0) or 0
     tmd_rain_3h = tmd_obs.get('rain_3h', 0) or 0
@@ -448,10 +447,8 @@ def get_comprehensive_rain_info() -> dict:
     elif rain_1h >= 2:
         actual_text = f"🌧️ มีฝนตกในชั่วโมงที่ผ่านมา {rain_1h:.1f} มม."
 
-    # ── NWP กรมอุตุฯ ─────────────────────────
     nwp_text = tmd_nwp.get('description', '') if tmd_nwp.get('available') else ''
 
-    # ── Tomorrow.io ──────────────────────────
     now_text      = tmr.get('now_summary', '') if tmr else ''
     tmr_slot_text = ''
     if tmr:
@@ -470,7 +467,6 @@ def get_comprehensive_rain_info() -> dict:
             times = ", ".join(x['time'] for x in tmr['watch_slots'][:3])
             tmr_slot_text = f"👀 Tomorrow.io: เฝ้าระวังช่วง {times} น. โอกาสฝน {s['rain_prob']:.0f}%"
 
-    # ── รวม ──────────────────────────────────
     parts = [p for p in [actual_text, nwp_text, now_text, tmr_slot_text] if p]
     if not parts:
         max_r = tmr.get('max_rain_24h', 0) if tmr else 0
@@ -481,7 +477,6 @@ def get_comprehensive_rain_info() -> dict:
     combined   = " | ".join(parts)
     confidence = f"(ข้อมูลจาก: {', '.join(sources_used)})" if sources_used else ""
 
-    # ── ระดับความเสี่ยงรวม ────────────────────
     nwp_rain    = tmd_nwp.get('rain_1h_max', 0) or 0
     nwp_thunder = tmd_nwp.get('thunder_max', 0) or 0
     has_danger  = (bool(tmr.get('danger_slots')) or nwp_rain >= 35
@@ -502,7 +497,7 @@ def get_comprehensive_rain_info() -> dict:
 
 
 # ─────────────────────────────────────────────
-# ฟังก์ชันเดิม ไม่แตะ
+# ฟังก์ชันดึงข้อมูลดาวเทียม / PM2.5 / สภาพอากาศ
 # ─────────────────────────────────────────────
 def get_hotspots():
     EE_JSON_KEY = os.environ.get("EE_JSON_KEY")
@@ -855,7 +850,8 @@ def _get_water_stations_web(names=("อินทร์บุรี", "โพน�
     seen = []
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
-        page    = browser.new_page()
+        context = browser.new_context(ignore_https_errors=True)
+        page    = context.new_page()
         try:
             page.goto(url, timeout=15000)
             page.wait_for_selector("th[scope='row']", timeout=10000)
@@ -898,38 +894,45 @@ def _first_number(*vals):
             continue
     return None
 
-def get_water_stations(names=("อินทร์บุรี", "โพนางดำ")):
-    """ดึงระดับน้ำจาก API ของ ThaiWater v3 โดยตรง (เร็วกว่าและไม่ติด Timeout)
-    ถ้า waterlevel_m เป็น null จะใช้ waterlevel_msl แทน | ถ้า API พัง/ไม่เจอสถานี จะถอยไปใช้การดึงจากหน้าเว็บเดิม"""
+_THAIWATER_CACHE = None
+def _fetch_thaiwater_api():
+    """ดึงข้อมูล ThaiWater API v3 ครั้งเดียวและแคชไว้ใช้ร่วมกันทั้งระดับน้ำและเขื่อน"""
+    global _THAIWATER_CACHE
+    if _THAIWATER_CACHE is not None:
+        return _THAIWATER_CACHE
     url = "https://api-v3.thaiwater.net/api/v1/thaiwater30/public/waterlevel"
     headers = {"User-Agent": "Mozilla/5.0", "Accept": "application/json"}
-    found = {n: None for n in names}
-
-    print("🔌 กำลังดึงข้อมูลระดับน้ำจาก ThaiWater API...")
     try:
-        res = requests.get(url, headers=headers, timeout=15)
+        res = requests.get(url, headers=headers, timeout=15, verify=False)
         if res.status_code == 200:
             payload = res.json()
-            water_data = payload.get("waterlevel_data", payload.get("data", [])) or []
-
-            for item in water_data:
-                station = item.get("station", {}) or {}
-                name_th = str(
-                    (station.get("tele_station_name", {}) or {}).get("th", "")
-                    or (station.get("station_name", {}) or {}).get("th", "")
-                    or item.get("station_name_th", "") or ""
-                )
-                for target in names:
-                    if found[target] is None and target in name_th:
-                        wl = _first_number(item.get("waterlevel_m"), item.get("waterlevel_msl"),
-                                           item.get("water_level"), item.get("wl_value"))
-                        if wl is not None:
-                            found[target] = wl
-                            print(f"✅ พบระดับน้ำ {target}: {wl} ม.")
+            _THAIWATER_CACHE = payload.get("waterlevel_data", payload.get("data", [])) or []
+            return _THAIWATER_CACHE
         else:
             print(f"⚠️ ThaiWater API HTTP {res.status_code}")
     except Exception as e:
         print(f"⚠️ เกิดข้อผิดพลาด API ThaiWater: {e}")
+    return []
+
+def get_water_stations(names=("อินทร์บุรี", "โพนางดำ")):
+    """ดึงระดับน้ำจาก API ของ ThaiWater v3 โดยตรง (ใส่ verify=False ป้องกัน SSLError)"""
+    found = {n: None for n in names}
+    print("🔌 กำลังดึงข้อมูลระดับน้ำจาก ThaiWater API...")
+    water_data = _fetch_thaiwater_api()
+    for item in water_data:
+        station = item.get("station", {}) or {}
+        name_th = str(
+            (station.get("tele_station_name", {}) or {}).get("th", "")
+            or (station.get("station_name", {}) or {}).get("th", "")
+            or item.get("station_name_th", "") or ""
+        )
+        for target in names:
+            if found[target] is None and target in name_th:
+                wl = _first_number(item.get("waterlevel_m"), item.get("waterlevel_msl"),
+                                   item.get("water_level"), item.get("wl_value"))
+                if wl is not None:
+                    found[target] = wl
+                    print(f"✅ พบระดับน้ำ {target}: {wl} ม.")
 
     # สำรอง: ถ้า API ไม่ได้ค่าของสถานีไหน ให้ลองหน้าเว็บเดิม
     missing = tuple(n for n, v in found.items() if v is None)
@@ -953,55 +956,79 @@ def get_inburi_data():
     return st.get("อินทร์บุรี"), ai_brain.BANK_LEVEL["อินทร์บุรี"]
 
 def get_phonangdam_from_hii():
-    """สำรอง: หาโพนางดำใน JSON ของ HII (หน้าเดียวกับที่ดึงเขื่อนเจ้าพระยา) รับเฉพาะฟิลด์ระดับน้ำที่ชัดเจน
-    ถ้าไม่เจอจะพิมพ์โครงสร้างลง log เพื่อให้รู้ว่าต้องชี้ไปฟิลด์ไหน"""
-    try:
-        res = requests.get(
-            f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php"
-            f"?cb={random.randint(10000, 99999)}", timeout=20)
-        mt = re.search(r'var json_data = (\[.*\]);', res.text)
-        if not mt:
-            print("ℹ️ HII: ไม่พบ json_data")
-            return None
-        data = json.loads(mt.group(1))
-        hits = []
-        def walk(o, path):
-            if isinstance(o, dict):
-                if any(isinstance(v, str) and "โพนางดำ" in v for v in o.values()):
-                    hits.append((path, o))
-                for k, v in o.items():
-                    walk(v, path + [k])
-            elif isinstance(o, list):
-                for i, v in enumerate(o):
-                    walk(v, path + [i])
-        walk(data, [])
-        for path, o in hits:
-            print(f"🔎 HII พบ 'โพนางดำ' ที่ {path}: { {k: o[k] for k in list(o)[:12]} }")
-            for f in ("wl", "water_level", "level"):
-                v = o.get(f)
-                try:
-                    return float(str(v).replace(",", ""))
-                except Exception:
-                    pass
-        if not hits:
-            iw = (data[0] or {}).get("itc_water") or {}
-            print(f"ℹ️ HII ไม่พบชื่อ 'โพนางดำ' | รหัสสถานีใน itc_water: {list(iw.keys())[:60]}")
-    except Exception as e:
-        print(f"⚠️ HII โพนางดำ error: {e}")
+    """สำรอง: หาโพนางดำจาก HII (ใส่ verify=False แก้ปัญหา SSLError)"""
+    urls = [
+        f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/2013/chaopraya.php?cb={random.randint(10000, 99999)}",
+        f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}",
+    ]
+    for url in urls:
+        try:
+            res = requests.get(url, timeout=20, verify=False)
+            mt = re.search(r'var json_data = (\[.*\]);', res.text)
+            if not mt:
+                continue
+            data = json.loads(mt.group(1))
+            hits = []
+            def walk(o, path):
+                if isinstance(o, dict):
+                    if any(isinstance(v, str) and "โพนางดำ" in v for v in o.values()):
+                        hits.append((path, o))
+                    for k, v in o.items():
+                        walk(v, path + [k])
+                elif isinstance(o, list):
+                    for i, v in enumerate(o):
+                        walk(v, path + [i])
+            walk(data, [])
+            for path, o in hits:
+                for f in ("wl", "water_level", "level"):
+                    v = _first_number(o.get(f))
+                    if v is not None:
+                        return v
+        except Exception as e:
+            print(f"⚠️ HII โพนางดำ error ({url.split('?')[0]}): {e}")
     return None
 
 def fetch_chao_phraya_dam_discharge():
+    """ดึงปริมาณน้ำระบายท้ายเขื่อนเจ้าพระยา (C.13) รองรับทั้ง HII, ThaiWater API และ WaterChart (ใส่ verify=False)"""
+    # 1) ลองดึงจากหน้า HII (2013 และ small) โดยใส่ verify=False
+    hii_urls = [
+        f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/2013/chaopraya.php?cb={random.randint(10000, 99999)}",
+        f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php?cb={random.randint(10000, 99999)}",
+    ]
+    for url in hii_urls:
+        try:
+            res = requests.get(url, timeout=20, verify=False)
+            match = re.search(r'var json_data = (\[.*\]);', res.text)
+            if match:
+                val = json.loads(match.group(1))[0]['itc_water']['C13']['storage']
+                dis = _first_number(val)
+                if dis is not None:
+                    print(f"✅ พบน้ำระบายเขื่อนเจ้าพระยา (HII JSON): {dis} ลบ.ม./วินาที")
+                    return dis
+            # กรณีถูก Redirect ไปหน้า waterchart.thaiwater.net/basin/chaophraya
+            m_chart = re.search(r'ท้ายเขื่อนเจ้าพระยา.*?cms\s*([0-9,]+(?:\.[0-9]+)?)', res.text, re.DOTALL)
+            if m_chart:
+                dis = _first_number(m_chart.group(1))
+                if dis is not None:
+                    print(f"✅ พบน้ำระบายเขื่อนเจ้าพระยา (WaterChart): {dis} ลบ.ม./วินาที")
+                    return dis
+        except Exception as e:
+            print(f"⚠️ เขื่อน HII error: {e}")
+
+    # 2) สำรอง: ค้นหาสถานี C.13 / เขื่อนเจ้าพระยา จาก ThaiWater API v3
     try:
-        res = requests.get(
-            f"https://tiwrm.hii.or.th/DATA/REPORT/php/chart/chaopraya/small/chaopraya.php"
-            f"?cb={random.randint(10000, 99999)}",
-            timeout=20)
-        match = re.search(r'var json_data = (\[.*\]);', res.text)
-        if match:
-            val = json.loads(match.group(1))[0]['itc_water']['C13']['storage']
-            return float(val) if isinstance(val, (int, float)) else float(str(val).replace(',', ''))
+        for item in _fetch_thaiwater_api():
+            station = item.get("station", {}) or {}
+            code = str(station.get("tele_station_oldcode") or item.get("tele_station_oldcode") or "").upper()
+            name_th = str((station.get("tele_station_name", {}) or {}).get("th", "") or "")
+            if code == "C.13" or "ท้ายเขื่อนเจ้าพระยา" in name_th or ("เขื่อนเจ้าพระยา" in name_th and "ท้าย" in name_th):
+                dis = _first_number(item.get("discharge"), item.get("storage"), item.get("flow_rate"))
+                if dis is not None and dis > 0:
+                    print(f"✅ พบน้ำระบายเขื่อนเจ้าพระยา (ThaiWater API): {dis} ลบ.ม./วินาที")
+                    return dis
     except Exception as e:
-        print(f"⚠️ เขื่อน error: {e}")
+        print(f"⚠️ เขื่อน ThaiWater API error: {e}")
+
     return None
 
 # ─────────────────────────────────────────────
@@ -1044,7 +1071,6 @@ def get_historical_water_data(target_date):
     
     station_data_pool = {"อินทร์บุรี": [], "โพนางดำ": []}
     
-    # --- ส่วนที่ 1: ดึงจากไฟล์ Excel ---
     for file_path in file_paths:
         if not os.path.exists(file_path): continue
         try:
@@ -1097,7 +1123,6 @@ def get_historical_water_data(target_date):
                     dummy_record = datetime(2000, 1, 1, dt_naive.hour, dt_naive.minute)
                     time_diff_sec = abs((dummy_target - dummy_record).total_seconds())
                     
-                    # --- คำนวณความห่างจากตลิ่ง ---
                     try:
                         wl_float = float(wl_val)
                         bank_lvl = 13.00 if station_name == "อินทร์บุรี" else 13.87
@@ -1116,7 +1141,6 @@ def get_historical_water_data(target_date):
                         'dt': dt_naive, 'wl': wl_val, 'dis': dis_val, 'b_status': b_status
                     })
 
-    # --- ส่วนที่ 2: ดึงจากไฟล์ CSV ---
     csv_file = "history_water.csv"
     if os.path.exists(csv_file):
         try:
@@ -1161,7 +1185,6 @@ def get_historical_water_data(target_date):
                         })
         except: pass
 
-    # --- ส่วนที่ 3: เลือกข้อมูลที่ดีที่สุด ---
     for st_name, data_list in station_data_pool.items():
         if not data_list: continue
         
@@ -1184,12 +1207,60 @@ def get_historical_water_data(target_date):
 
 
 # ─────────────────────────────────────────────
+# Emergency Fallback ชั้นที่ 2 (กรณี template_post ใน ai_brain ขัดข้อง)
+# ─────────────────────────────────────────────
+def _emergency_fallback_post(facts: dict, header: str) -> str:
+    w = facts.get("water", {})
+    wea = facts.get("weather", {})
+    pm = facts.get("pm25", {})
+    rs = facts.get("rain_storm", {})
+
+    wl_val = w.get("current_wl")
+    bank_lvl = w.get("bank_level", 13.00)
+    dis_val = w.get("current_discharge")
+
+    lines = [header, ""]
+    if wl_val is not None:
+        diff = round(float(bank_lvl) - float(wl_val), 2)
+        if diff > 0:
+            bank_txt = f"ต่ำกว่าตลิ่ง {diff:.2f} เมตร (ตลิ่ง {bank_lvl:.2f} ม.)"
+        elif diff < 0:
+            wall_diff = round(15.00 - float(wl_val), 2)
+            bank_txt = f"สูงกว่าระดับตลิ่งเดิม {abs(diff):.2f} เมตร (ยังต่ำกว่าสันเขื่อนกั้นน้ำ 15.00 ม. อยู่ {wall_diff:.2f} ม.)"
+        else:
+            bank_txt = f"เสมอระดับตลิ่งพอดี ({bank_lvl:.2f} ม.)"
+        lines.append(f"🌊 ระดับน้ำเจ้าพระยา (อินทร์บุรี): **{float(wl_val):.2f} เมตร** ({bank_txt})")
+    else:
+        lines.append("🌊 ระดับน้ำเจ้าพระยา (อินทร์บุรี): รออัปเดตสัญญาณจากสถานีวัดน้ำ")
+
+    if dis_val is not None:
+        lines.append(f"🚧 เขื่อนเจ้าพระยาระบายน้ำ: **{float(dis_val):,.0f} ลบ.ม./วินาที**")
+
+    temp_c = wea.get("temp_c", "N/A")
+    hum_pct = wea.get("humidity_pct", "N/A")
+    lines.append(f"🌡️ สภาพอากาศ: อุณหภูมิ {temp_c} °C | ความชื้น {hum_pct}%")
+    lines.append(f"☁️ แนวโน้มฝน: {rs.get('summary', 'ติดตามสภาพอากาศปกติ')}")
+    lines.append(f"😷 ค่าฝุ่น PM2.5: {pm.get('value', 'N/A')} µg/m³ (ระดับ{pm.get('level', 'ไม่ทราบ')})")
+    return "\n".join(lines)
+
+
+# ─────────────────────────────────────────────
 # Main (เวอร์ชัน AI agent: ค้นข่าว -> วิเคราะห์ -> เขียน -> ตรวจ -> โพสต์)
 # ─────────────────────────────────────────────
 import ai_brain
 
 DRY_RUN = os.environ.get("DRY_RUN", "0") == "1"                       # 1 = ไม่ส่ง webhook
 POST_TEMPLATE_ON_AI_FAIL = os.environ.get("POST_TEMPLATE_ON_AI_FAIL", "1") != "0"
+
+def _reset_ai_circuit_breaker():
+    """ล้างสถานะ Circuit Breaker ชั่วคราวในกรณีที่พังเฉพาะตอนเรียก Google Search Grounding"""
+    for attr in ("_CIRCUIT_BROKEN", "CIRCUIT_BROKEN"):
+        if hasattr(ai_brain, attr):
+            setattr(ai_brain, attr, False)
+    for dict_attr in ("_EXHAUSTED", "_COOLDOWN", "_DEAD_KEYS"):
+        obj = getattr(ai_brain, dict_attr, None)
+        if isinstance(obj, (dict, set)):
+            obj.clear()
 
 if __name__ == "__main__":
     print("=== เริ่มรวบรวมข้อมูลอินทร์บุรี ===")
@@ -1207,6 +1278,9 @@ if __name__ == "__main__":
     if pho_wl is None:
         pho_wl = get_phonangdam_from_hii()
     discharge = fetch_chao_phraya_dam_discharge()
+    if discharge is None and prev_discharge is not None:
+        print(f"ℹ️ ใช้ค่าเขื่อนเจ้าพระยาล่าสุดจาก state ชั่วคราว: {prev_discharge}")
+        discharge = prev_discharge
     hotspots = get_hotspots()
     rain_info = get_comprehensive_rain_info()
 
@@ -1215,7 +1289,7 @@ if __name__ == "__main__":
     save_current_water_data(wl, discharge, pho_wl)
     water_ctx = ai_brain.build_water_context(now, wl, discharge, series, bank_level, pho_wl=pho_wl)
     if water_ctx.get("change_24h") is None and wl is not None and prev_wl is not None:
-        water_ctx["change_since_last_run"] = round(float(wl) - float(prev_wl), 2)   # ไม่ใช่ "เมื่อวาน"
+        water_ctx["change_since_last_run"] = round(float(wl) - float(prev_wl), 2)
     risk = ai_brain.assess_water_risk(water_ctx)
     print(f"🌊 ความเสี่ยงน้ำ: {risk['level']} | {risk['reasons']}")
 
@@ -1248,20 +1322,27 @@ if __name__ == "__main__":
         "water": {**water_ctx, "risk_level": risk['level'], "risk_reasons": risk['reasons']},
     }
 
-    facts = ai_brain.thai_dates(facts)   # วันที่ทั้งหมดเป็น วัน เดือน ปี(พ.ศ.) ก่อนส่งให้ AI/เทมเพลต
+    facts = ai_brain.thai_dates(facts)
 
     header = f"**สถานการณ์อินทร์บุรี** (ข้อมูล ณ วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str})"
     when_text = f"วัน{thai_day_of_week}ที่ {date_str} เวลา {time_str}"
 
-    # ── 4) ค้นข่าวล่าสุด -> วิเคราะห์ -> เขียน -> ตรวจ (ทุกขั้นตอน AI อยู่ใน try เดียว: พังตรงไหนก็สลับเป็นเทมเพลต) ──
+    # ── 4) ค้นข่าวล่าสุด -> วิเคราะห์ -> เขียน -> ตรวจ ──
     final_post = ""
     analysis = None
     try:
-        research_text, sources = ai_brain.research_latest(client, when_text, period, water_ctx, risk)
+        # แยก try ของ research_latest ออก: ถ้าโควตา Google Search หมด ให้ข้ามไปเขียนโพสต์ต่อได้
+        try:
+            research_text, sources = ai_brain.research_latest(client, when_text, period, water_ctx, risk)
+        except Exception as re_err:
+            print(f"⚠️ ข้ามการค้นข่าว Google Search ({re_err}) -> รีเซ็ตสถานะเพื่อลองเขียนโพสต์ด้วยโควตาปกติ")
+            _reset_ai_circuit_breaker()
+            research_text, sources = "ไม่มีข่าวเพิ่มเติม", []
+
         prev_post = ai_brain.previous_post_brief(state)
 
         analysis = ai_brain.analyze(client, facts, risk, research_text, prev_post)
-        print(f"🧠 analysis: level={analysis['level']} focus={analysis.get('focus')}")
+        print(f"🧠 analysis: level={analysis.get('level')} focus={analysis.get('focus')}")
 
         draft = ai_brain.write_post(client, facts, analysis, research_text, prev_post, header, has_fire)
         final_post, leftover = ai_brain.review_and_fix(
@@ -1277,12 +1358,22 @@ if __name__ == "__main__":
             print(f"❌ AI ล้มเหลวจากสาเหตุอื่น: {error_msg} -> สลับใช้ Template")
         final_post = ""
         if POST_TEMPLATE_ON_AI_FAIL:
-            if analysis is None:   # พังก่อน analyze เสร็จ
-                analysis = {"level": risk["level"], "focus": "water"}
+            lvl = risk.get("level", "normal")
+            lvl_info = getattr(ai_brain, "LEVEL_INFO", {}).get(lvl, {})
+            if analysis is None or "level_label" not in analysis:
+                analysis = {
+                    "level": lvl,
+                    "level_label": lvl_info.get("label", "เฝ้าระวัง"),
+                    "tone": lvl_info.get("tone", ""),
+                    "focus": "water",
+                    "headline_point": "",
+                    "action_tip": "",
+                }
             try:
                 final_post = ai_brain.template_post(facts, analysis, header)
             except Exception as te:
-                print(f"❌ template_post ก็ล้มเหลว: {te}")
+                print(f"⚠️ template_post ใน ai_brain ขัดข้อง ({te}) -> ใช้ระบบสำรองฉุกเฉิน")
+                final_post = _emergency_fallback_post(facts, header)
 
     if final_post:
         final_post = final_post.strip() + "\n\n#อินทร์บุรีรอดมั้ย #VIIRS #GEE"
