@@ -321,7 +321,7 @@ def _load_keys():
 
 
 def _discover_groq_models(key: str) -> list:
-    """ถาม API ของ Groq โดยตรงว่าคีย์นี้เปิดสิทธิ์ให้ใช้โมเดลชื่ออะไรบ้าง (แก้ปัญหา 404 model_not_found ถาวร)"""
+    """ถาม API ของ Groq โดยตรงว่าคีย์นี้เปิดสิทธิ์ให้ใช้โมเดลชื่ออะไรบ้าง (กรองโมเดลเสียง orpheus ออก)"""
     cache_key = f"groq_{key[-6:]}"
     if cache_key in _PROVIDER_MODELS_CACHE:
         return _PROVIDER_MODELS_CACHE[cache_key]
@@ -333,13 +333,15 @@ def _discover_groq_models(key: str) -> list:
         )
         if r.status_code == 200:
             raw_models = [m.get("id", "") for m in r.json().get("data", []) if m.get("id")]
-            # กรองโมเดลเสียง/ระบบตรวจสอบความปลอดภัยออก เหลือเฉพาะโมเดลแชตข้อความ
+            # กรองโมเดลเสียง (orpheus/whisper/tts) และระบบตรวจความปลอดภัยออก เหลือเฉพาะโมเดลแชตข้อความ
             chat_models = [
                 m for m in raw_models
-                if not any(skip in m.lower() for skip in ("whisper", "tts", "guard", "vision", "embed", "audio", "playai"))
+                if not any(skip in m.lower() for skip in (
+                    "whisper", "tts", "guard", "vision", "embed", "audio", "playai", "orpheus", "safeguard"
+                ))
             ]
             # จัดลำดับโมเดลที่เก่งภาษาไทยขึ้นก่อน
-            priority_keywords = ("llama-4", "llama-3.3", "qwen", "deepseek", "gemma", "llama-3.1", "llama3", "mixtral", "compound")
+            priority_keywords = ("qwen", "llama-4", "llama-3.3", "deepseek", "gemma", "llama-3.1", "llama3", "mixtral", "gpt-oss")
             preferred = []
             for kw in priority_keywords:
                 for m in chat_models:
@@ -355,7 +357,7 @@ def _discover_groq_models(key: str) -> list:
             print(f"⚠️ ตรวจสอบรายชื่อโมเดล Groq HTTP {r.status_code}: {r.text[:200]}")
     except Exception as e:
         print(f"⚠️ ตรวจสอบรายชื่อโมเดล Groq ไม่สำเร็จ: {e}")
-    return ["llama-3.3-70b-versatile", "llama3-70b-8192", "gemma2-9b-it"]
+    return ["qwen/qwen3.8-27b", "llama-3.3-70b-versatile"]
 
 
 def _detect_provider(key: str):
@@ -373,29 +375,37 @@ def _call_openai_compat(provider, url, model, key, prompt, json_mode, temperatur
         "Authorization": f"Bearer {key}",
         "Content-Type": "application/json",
     }
+    # กำหนด max_tokens ไม่ให้เกินเพดาน OTPM (Limit 1000) ของ Groq Free Tier
+    max_tok = 450 if json_mode else 750
     payload = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": temperature,
+        "max_tokens": max_tok,
     }
-    if json_mode and provider in ("groq", "openai"):
+    if json_mode and provider in ("groq", "openai") and "gpt-oss" not in model:
         payload["response_format"] = {"type": "json_object"}
 
-    res = requests.post(url, headers=headers, json=payload, timeout=25)
-    if res.status_code == 200:
-        data = res.json()
-        txt = (data.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-        if txt:
-            return txt
-        raise RuntimeError("ข้อความตอบกลับว่างเปล่า")
-    # กรณีโมเดลใดไม่รองรับ json_object ให้ลองส่งใหม่แบบปกติแล้วให้ _json_loads แกะ JSON เอง
-    if json_mode and res.status_code == 400 and "response_format" in res.text:
-        payload.pop("response_format", None)
-        res2 = requests.post(url, headers=headers, json=payload, timeout=25)
-        if res2.status_code == 200:
-            txt = (res2.json().get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+    for attempt in range(2):
+        res = requests.post(url, headers=headers, json=payload, timeout=25)
+        if res.status_code == 200:
+            data = res.json()
+            msg = data.get("choices", [{}])[0].get("message", {}) or {}
+            txt = (msg.get("content") or "").strip()
+            # ล้างแท็ก <think>...</think> กรณีโมเดลตระกูล Qwen/DeepSeek ส่งความคิดติดมาด้วย
+            txt = re.sub(r"<think>.*?</think>", "", txt, flags=re.S).strip()
             if txt:
                 return txt
+            raise RuntimeError("ข้อความตอบกลับว่างเปล่า")
+        # กรณีติดลิมิต OTPM รายนาที (429) ให้พักรอ 12 วินาทีแล้วลองซ้ำในโมเดลเดิมอีก 1 ครั้ง
+        if res.status_code == 429 and "otpm" in res.text.lower() and attempt == 0:
+            print(f"⏳ รอรีเซ็ตโควตาโทเคนต่อนาที (OTPM) 12 วินาที สำหรับ {model}...")
+            time.sleep(12)
+            continue
+        if json_mode and res.status_code == 400 and "response_format" in res.text:
+            payload.pop("response_format", None)
+            continue
+        break
     raise RuntimeError(f"HTTP {res.status_code}: {res.text[:300]}")
 
 
@@ -596,8 +606,8 @@ def write_post(client, facts, analysis, research_text, prev_post, header, has_fi
 3. เทียบปีที่แล้ว: 1-2 ประโยค บอกส่วนต่างวันนี้ + ปีที่แล้วหลังช่วงนี้น้ำขึ้นไปสูงสุดเท่าไหร่ (ถ้ามีข้อมูล) ห้ามใช้ "ต่ำกว่าปีที่แล้ว" เป็นเหตุผลว่าปลอดภัย
 4. เทียบ "เมื่อวาน" ได้เฉพาะถ้ามี change_24h ในข้อมูล ถ้าไม่มีให้ไม่พูดถึง
 5. ห้ามบอกว่าฝนกำลังตก/ฝนปรอย ถ้า rain_now_confirmed เป็น false ให้พูดเป็น "โอกาสฝน" และใช้ตัวเลขเปอร์เซ็นต์โอกาสฝนตามที่ให้มา (max_rain_prob_24h_pct) เท่านั้น
-6. ระบายน้ำเขื่อน: ใช้ตัวเลขของเขื่อนเจ้าพระยาเท่านั้น ห้ามใส่ตัวเลขระบายน้ำของโพนางดำ
-   โพนางดำ: ต้องมีหัวข้อนี้เสมอ! ถ้ามี phonangdam_now ให้บอกระดับน้ำ แต่ถ้าไม่มี ให้เขียนว่า "วันนี้ยังไม่มีค่าล่าสุด" พร้อมตัวเลขปีที่แล้ว ห้ามข้ามหัวข้อโพนางดำเด็ดขาด
+6. ระบายน้ำเขื่อน: ใช้ตัวเลขของเขื่อนเจ้าพระยาเท่านั้น
+   ห้ามพูดถึงโพนางดำในโพสต์เด็ดขาด ไม่ต้องมีหัวข้อโพนางดำ ไม่ต้องใส่ตัวเลขของโพนางดำ
 7. ฝุ่น: ใช้ถ้อยคำให้ตรงกับระดับ (pm25.instruction)
 8. ไม่ต้องใส่หัวข้อข่าว 📰 ให้สรุปจากข้อมูลจริงล้วนๆ
 9. ทักทายตามวัน{facts['now']['weekday']} และช่วง{facts['now']['period']}จริงๆ
@@ -612,7 +622,6 @@ def write_post(client, facts, analysis, research_text, prev_post, header, has_fi
 {fire_line}🌧️ **เฝ้าระวังฝนและพายุ:** …
 🌊 **ระดับน้ำอินทร์บุรี:** …
 🛑 **ระบายน้ำเขื่อนเจ้าพระยา:** …
-🏞️ **ระดับน้ำโพนางดำ:** …
 📌 **สรุป:** …"""
     txt, _ = _gen(client, prompt, temperature=0.7)
     return txt
@@ -637,8 +646,8 @@ def rule_check(post, analysis, facts):
         problems.append("ใช้วันที่แบบ 2025-09-29 ต้องเขียนเป็น วัน เดือน ปี แบบไทย (พ.ศ.)")
     if len(post) > 1300:
         problems.append(f"ยาวเกินไป ({len(post)} ตัวอักษร) ตัดให้เหลือไม่เกิน ~900")
-    if "โพนางดำ" not in post:
-        problems.append("ไม่มีหัวข้อโพนางดำ ต้องเล่าให้ครบ")
+    if "โพนางดำ" in post:
+        problems.append("ห้ามพูดถึงโพนางดำ ให้ลบหัวข้อโพนางดำออกทั้งหมด")
     wl = facts.get("water", {}).get("wl")
     if wl is not None and f"{wl:g}" not in post and f"{wl:.2f}" not in post:
         problems.append(f"ไม่ได้ระบุระดับน้ำปัจจุบัน {wl:.2f} ม.")
@@ -799,7 +808,7 @@ def _choose_dynamic_tip(lvl, w):
 
 
 def template_post(facts, analysis, header):
-    """เทมเพลตสำรอง 100% จากโค้ด พร้อมระบบสุ่มสลับข้อความสรุปตามแนวโน้มน้ำจริง"""
+    """เทมเพลตสำรอง 100% จากโค้ด (ตัดหัวข้อโพนางดำออกถาวร)"""
     lines = [header, ""]
     w = facts.get("water") or {}
     lvl = (analysis or {}).get("level") or w.get("risk_level") or "watch"
@@ -822,20 +831,13 @@ def template_post(facts, analysis, header):
             d += " เท่าเมื่อวาน" if abs(dj) < 0.5 else f" ({'เพิ่ม' if dj > 0 else 'ลด'}จากเมื่อวาน {abs(dj):,.0f})"
         lines.append(d)
 
-    pn, pl = w.get("phonangdam_now"), w.get("phonangdam_last_year")
-    if pn:
-        s = _station_line("🏞️", "โพนางดำ", pn)
-        vl = pn.get("vs_last_year")
-        if vl:
-            s += f" (ปีที่แล้ววันเดียวกัน {_m(vl['wl'])} เมตร)"
-        lines.append(s)
-    elif pl:
-        lines.append(f"🏞️ โพนางดำ: วันนี้ยังไม่มีค่าล่าสุด (ปีที่แล้วช่วงนี้ {_m(pl['wl'])} เมตร)")
+    # ตัดหัวข้อโพนางดำออกตามความต้องการ
 
     w8, pm, rs = facts.get("weather") or {}, facts.get("pm25") or {}, facts.get("rain_storm") or {}
     seg = []
     if w8.get("temp_c") is not None:
-        seg.append(f"{w8['temp_c']} องศา")
+        st_name = w8.get("station_name")
+        seg.append(f"{w8['temp_c']} องศา" + (f" (สถานี{st_name})" if st_name else ""))
     if pm.get("value") is not None:
         seg.append(f"ฝุ่น PM2.5 ระดับ{pm.get('level', '-')} ({pm['value']})")
     if rs.get("max_rain_prob_24h_pct") is not None:
